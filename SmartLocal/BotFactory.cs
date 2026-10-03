@@ -311,12 +311,18 @@ namespace SmartLocal
         //   佐证：Constants.DummyNamePrefix / SaveIconCamera.saveIconDummy
         //   都表明官方自己会造 dummy 玩家。
 
+        /// <summary>本批创建的假人，供 BotManager 接管。</summary>
+        internal static readonly System.Collections.Generic.List<PlayerControl> CreatedBots
+            = new System.Collections.Generic.List<PlayerControl>();
+
         /// <summary>
         /// 全部走 isDummy 路径生成假人。
         /// 返回调用序列成功的数量（不代表游戏已完全接受，需看后续日志）。
         /// </summary>
         internal static int SpawnAllDummies(int count)
         {
+            CreatedBots.Clear();
+
             var auc = AmongUsClient.Instance;
             if (auc == null) { Plugin.Logger.LogError("[假人] AmongUsClient.Instance 为空。"); return 0; }
 
@@ -366,6 +372,124 @@ namespace SmartLocal
             byte pid = (byte)gd.GetAvailableId();
             pc.PlayerId = pid;
 
+            // ⚠️ 这里**不再**关闭假人的 inputHandler。
+            //
+            // 历史上这一行是用来修「一按 WASD 假人一起走」的，但那其实是
+            // DummyBehaviour / 位置同步 造成的，关错了对象。
+            //
+            // 方案A 的架构下（我们拥有位置、每帧写入），假人的速度驱动会被
+            // 我们的位置写入完全覆盖，所以**不需要碰输入接收器**。
+            // 而且实践发现：碰它会波及游戏自身的输入判定 ——
+            // 实测症状是「玩家自己被固定、按 WASD 动的却是假人」。
+            //
+            // 原则：只拥有位置，别的都不碰。
+
+            // 状态复位（同样参考 MCI 的做法，避免残留动画/移动状态）
+            try
+            {
+                pc.MyPhysics?.ResetMoveState(true);
+                pc.MyPhysics?.ResetAnimState();
+            }
+            catch { /* 非致命 */ }
+
+            // ★★★ 真正的输入读取者：KeyboardJoystick ★★★
+            //
+            // 上一轮我关的是 MyPhysics.inputHandler（类型是 SpecialInputHandler），
+            // 日志显示 28 次全部关闭成功，但假人依然跟随玩家 —— 说明关错了组件。
+            //
+            // 决定性证据（来自用户实测）：
+            //   打开设置菜单（输入被屏蔽）→ 假人乱走（我们的 AI 方向生效）
+            //   关掉菜单（输入恢复）      → 假人又全体跟随
+            // 证明假人确实在读取键盘输入，只是读取者不是 SpecialInputHandler。
+            //
+            // MCI 这个 Mod patch 的是 KeyboardJoystick.Update —— 那才是键盘读取组件，
+            // 它是挂在角色上的独立 MonoBehaviour。
+            try
+            {
+                var kj = pc.GetComponent<KeyboardJoystick>();
+                if (kj != null)
+                {
+                    kj.enabled = false;
+                    Plugin.Logger.LogInfo($"[假人] {name} KeyboardJoystick 已关闭");
+                }
+                else
+                {
+                    Plugin.Logger.LogWarning($"[假人] {name} 身上没有 KeyboardJoystick 组件（需另找输入源）");
+                }
+            }
+            catch (Exception e)
+            {
+                Plugin.Logger.LogError($"[假人] {name} 关闭 KeyboardJoystick 失败: {e.Message}");
+            }
+
+            // ★★★★ 真正的元凶：DummyBehaviour ★★★★
+            //
+            // 组件清单（实测）显示假人身上挂着 8 个 MonoBehaviour，其中一个是
+            // **DummyBehaviour** —— 游戏自带的「假人行为」组件。
+            //
+            // Among Us 的 dummy 本来就是装饰性的（商店预览那类），
+            // 这个组件的作用就是让它们**跟着本机玩家移动**，而且是**直接写位置**。
+            //
+            // 这一条解释了我们踩过的所有坑：
+            //   为什么改 ownerId 无效        → 跟随与归属无关
+            //   为什么拦 SetNormalizedVelocity 无效 → 它根本不经速度通道
+            //   为什么位置接管能压制它        → 那是唯一比它更晚的写入点
+            //   为什么关 inputHandler 无效    → 输入源压根不在假人身上
+            //   为什么开设置菜单会「乱走」    → 玩家不能动时它没得跟，我们的方向才显现
+            //
+            // 而且是我们自己打开它的：pc.isDummy = true 很可能就是激活开关。
+            //
+            // 修法：直接销毁这个组件。保留 isDummy 标志位不动（GameData 可能依赖它），
+            // 只把「行为」摘掉。
+            try
+            {
+                var db = pc.GetComponent<DummyBehaviour>();
+                if (db != null)
+                {
+                    bool wasEnabled = db.enabled;
+                    db.enabled = false;                 // 立即生效，本帧就不再跑
+                    UnityEngine.Object.Destroy(db);     // 再彻底移除
+                    Plugin.Logger.LogInfo($"[假人] {name} DummyBehaviour 已移除（原 enabled={wasEnabled}）");
+                }
+                else
+                {
+                    Plugin.Logger.LogWarning($"[假人] {name} 身上没有 DummyBehaviour");
+                }
+            }
+            catch (Exception e)
+            {
+                Plugin.Logger.LogError($"[假人] {name} 移除 DummyBehaviour 失败: {e.Message}");
+            }
+
+            pc.moveable = true;
+
+            // 诊断：把第一个假人身上所有组件类型打出来。
+            // 如果 KeyboardJoystick 不在身上，这份清单就是找到真正输入源的唯一线索 ——
+            // 上一轮的教训是「关错了组件却以为成功」，不能再靠猜。
+            if (index == 0)
+            {
+                try
+                {
+                    var comps = pc.GetComponents<UnityEngine.MonoBehaviour>();
+                    var sb = new System.Text.StringBuilder();
+                    int n = comps != null ? comps.Length : 0;
+                    for (int i = 0; i < n; i++)
+                    {
+                        var c = comps[i];
+                        if (c == null) continue;
+                        string tn;
+                        try { tn = c.GetIl2CppType().Name; }
+                        catch { tn = c.GetType().Name; }
+                        sb.Append(tn).Append(" | ");
+                    }
+                    Plugin.Logger.LogInfo($"[组件清单] 假人#0 共 {n} 个 MonoBehaviour: {sb}");
+                }
+                catch (Exception e)
+                {
+                    Plugin.Logger.LogWarning($"[组件清单] 采集失败: {e.Message}");
+                }
+            }
+
             // 4) 外观
             pc.SetName(name);
             pc.SetColor(index % 12);
@@ -382,10 +506,17 @@ namespace SmartLocal
                 info.MarkDirty();
             }
 
-            // 6) 网络对象登记。ownerId 用**本机客户端**——
-            //    这些角色由我们自己所有，服务端不需要等其他任何客户端。
-            auc.Spawn(pc, auc.ClientId, SpawnFlags.None);
-            Plugin.Logger.LogInfo($"[假人] {name} Spawn 已调用 ownerId={auc.ClientId}");
+            // 6) 网络对象登记。
+            //    ownerId 策略见 Plugin.UseNoClientOwner：
+            //      NoClientId  → 游戏不把本地输入套到它们身上（独立 AI 前提）
+            //      本机 ClientId → 蜂群模式（共享玩家输入）
+            int owner = Plugin.UseNoClientOwner ? InnerNetClient.NoClientId : auc.ClientId;
+            auc.Spawn(pc, owner, SpawnFlags.None);
+            Plugin.Logger.LogInfo($"[假人] {name} Spawn 已调用 ownerId={owner}" +
+                                  (Plugin.UseNoClientOwner ? "（NoClientId）" : "（本机，蜂群模式）"));
+
+            // 记录下来交给 BotManager 接管
+            CreatedBots.Add(pc);
 
             // 7) 手动入座兜底：isDummy 路径不经过 CreatePlayer，
             //    PlayerPhysics.CoSpawnPlayer 可能不会被自动触发，先按座位号摆好。

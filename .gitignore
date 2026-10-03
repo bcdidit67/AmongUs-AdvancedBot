@@ -18,3 +18,7 @@ releases/**/*.tar.gz
 # ── 系统 ──
 .DS_Store
 Thumbs.db
+
+# ── 发布产物（走 GitHub Releases，不入库）──
+dist/*.zip
+dist/SmartLocal-v*/

@@ -171,6 +171,9 @@ namespace SmartLocal
             // 名字/外观修正（dummy 玩家的 ClientId 是 NoClientId，不走 FixupBotNames 的过滤条件）
             BotFactory.FixupDummyNames();
 
+            // 交给 AI 总管接管：阶段 7 从这里开始
+            BotManager.Attach(BotFactory.CreatedBots);
+
             // 再观察一段时间，确认它们稳定存在（而不是闪一下就被回收）
             for (int f = 0; f < 300; f++) yield return null;
             Plugin.Logger.LogInfo($"[假人路径] 5 秒后复查：PlayerControl={CountPlayers()}  GameData={CountGameData()}");

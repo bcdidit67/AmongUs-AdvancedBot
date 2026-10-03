@@ -174,3 +174,12 @@ WINEDLLOVERRIDES="winhttp=n,b" %command%
 
 本项目仅供**纯本地单机**使用，不涉及联机对战、不修改任何在线服务数据。
 请勿用于任何形式的联机作弊。
+
+---
+
+## 许可证
+
+[MIT License](LICENSE) © 2026 bcdidit67
+
+Among Us 是 Innersloth LLC 的商标与版权作品。本项目为独立的第三方 Mod，
+与 Innersloth 无任何关联，亦未获得其背书。仓库中不包含任何游戏原始资源。

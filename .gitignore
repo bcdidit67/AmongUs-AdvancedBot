@@ -1,0 +1,20 @@
+# ── 构建产物 ──
+bin/
+obj/
+*.user
+
+# ── 二进制 / 日志归档（走 GitHub Releases 分发，不入库）──
+releases/**/*.dll
+releases/**/*.log
+releases/**/*.tar.gz
+
+# ── 编辑器 / IDE ──
+.vs/
+.idea/
+.vscode/
+*.swp
+*~
+
+# ── 系统 ──
+.DS_Store
+Thumbs.db

@@ -22,3 +22,7 @@ Thumbs.db
 # ── 发布产物（走 GitHub Releases，不入库）──
 dist/*.zip
 dist/SmartLocal-v*/
+
+# ── interop 备份（本地资产，19MB，可用 ProtoDump 重新生成）──
+interop-backup/
+UNINSTALL-*

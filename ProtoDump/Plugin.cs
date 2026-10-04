@@ -1,0 +1,168 @@
+using System;
+using System.Reflection;
+using BepInEx;
+using BepInEx.Logging;
+using BepInEx.Unity.IL2CPP;
+using Il2CppInterop.Runtime.Injection;
+using InnerNet;
+using UnityEngine;
+
+namespace ProtoDump
+{
+    /// <summary>
+    /// 协议常量导出插件。
+    ///
+    /// 目的：把「元数据里读不到、只有运行期才知道」的协议常量打进日志。
+    ///
+    /// 关键是 **InnerNet.Tags 的那 26 个静态 byte 值** —— 它们在元数据里只有
+    /// 「静态属性」这个事实，没有数值；而它们是构造任何协议包的基础。
+    /// 公开的协议文档是旧版本的（v19 多出 10 个包类型），只有运行中的游戏才是权威。
+    ///
+    /// 做法：**用反射遍历所有静态属性**，而不是硬编码标签名 ——
+    /// 这样即使 v19 新增了包类型也一个不漏。
+    /// </summary>
+    [BepInPlugin(Guid, "ProtoDump", "1.0.0")]
+    public class Plugin : BasePlugin
+    {
+        public const string Guid = "com.smartlocal.protodump";
+        internal static ManualLogSource L;
+
+        public override void Load()
+        {
+            L = Log;
+            L.LogInfo("════════ ProtoDump 开始导出协议常量 ════════");
+
+            DumpTags();
+            DumpRpcCalls();
+            DumpGameDataTypes();
+
+            // 客户端状态（GameId 等）需要延迟到进房后才有值
+            try
+            {
+                ClassInjector.RegisterTypeInIl2Cpp<ClientWatcher>();
+                AddComponent<ClientWatcher>();
+                L.LogInfo("[ProtoDump] ClientWatcher 已挂载，将每 2 秒检查一次客户端状态");
+            }
+            catch (Exception e)
+            {
+                L.LogError($"[ProtoDump] 挂载 ClientWatcher 失败: {e}");
+            }
+
+            L.LogInfo("════════ ProtoDump 导出完毕 ════════");
+        }
+
+        /// <summary>
+        /// ★ 核心：反射遍历 InnerNet.Tags 的全部静态属性，读出运行期真值。
+        /// </summary>
+        private static void DumpTags()
+        {
+            L.LogInfo("──── InnerNet.Tags（顶层包类型 / 握手标签）────");
+            try
+            {
+                var t = typeof(Tags);
+                var props = t.GetProperties(BindingFlags.Public | BindingFlags.Static);
+                int n = 0;
+                foreach (var p in props)
+                {
+                    try
+                    {
+                        object v = p.GetValue(null);
+                        if (v == null) { L.LogWarning($"  [TAG] {p.Name} = <null>"); continue; }
+                        byte b = Convert.ToByte(v);
+                        L.LogInfo($"  [TAG] {p.Name} = 0x{b:X2}  ({b})");
+                        n++;
+                    }
+                    catch (Exception e) { L.LogWarning($"  [TAG] {p.Name} 读取失败: {e.Message}"); }
+                }
+                L.LogInfo($"  → 共 {n} 个标签");
+            }
+            catch (Exception e) { L.LogError($"  Tags 反射失败: {e}"); }
+        }
+
+        /// <summary>RpcCalls 枚举的全部取值（元数据里其实有，这里做交叉验证）</summary>
+        private static void DumpRpcCalls()
+        {
+            L.LogInfo("──── RpcCalls（RPC 操作码）────");
+            try
+            {
+                var t = typeof(RpcCalls);
+                int n = 0;
+                foreach (var name in Enum.GetNames(t))
+                {
+                    try
+                    {
+                        var v = Convert.ToByte(Enum.Parse(t, name));
+                        L.LogInfo($"  [RPC] {name} = {v}");
+                        n++;
+                    }
+                    catch (Exception e) { L.LogWarning($"  [RPC] {name} 解析失败: {e.Message}"); }
+                }
+                L.LogInfo($"  → 共 {n} 个 RPC");
+            }
+            catch (Exception e) { L.LogError($"  RpcCalls 反射失败: {e}"); }
+        }
+
+        private static void DumpGameDataTypes()
+        {
+            L.LogInfo("──── GameDataTypes（GameData 内部分类）────");
+            try
+            {
+                var t = Type.GetType("AmongUs.InnerNet.GameDataMessages.GameDataTypes, Assembly-CSharp");
+                if (t == null) { L.LogWarning("  找不到 GameDataTypes 类型"); return; }
+                foreach (var name in Enum.GetNames(t))
+                {
+                    try
+                    {
+                        var v = Convert.ToByte(Enum.Parse(t, name));
+                        L.LogInfo($"  [GDT] {name} = 0x{v:X2}");
+                    }
+                    catch { }
+                }
+            }
+            catch (Exception e) { L.LogError($"  GameDataTypes 反射失败: {e}"); }
+        }
+    }
+
+    /// <summary>
+    /// 盯着 AmongUsClient，把 GameId / ClientId / HostId 等只有进房后才有值的状态打出来。
+    /// ★ 其中 GameId 是外置 bot 客户端构造 JoinGame 包唯一需要的参数。
+    /// </summary>
+    public class ClientWatcher : MonoBehaviour
+    {
+        public ClientWatcher(IntPtr ptr) : base(ptr) { }
+
+        private float _t;
+        private int _lastGameId = int.MinValue;
+        private int _ticks;
+
+        private void Update()
+        {
+            _t += Time.deltaTime;
+            if (_t < 2f) return;
+            _t = 0f;
+            if (++_ticks > 60) { enabled = false; return; }   // 最多盯 2 分钟
+
+            try
+            {
+                var c = AmongUsClient.Instance;
+                if (c == null) return;
+
+                int gid = c.GameId;
+                // GameId 变化时全量打印，否则静默
+                if (gid != _lastGameId)
+                {
+                    _lastGameId = gid;
+                    Plugin.L.LogInfo(
+                        $"  [CLIENT] ★ GameId={gid} (0x{unchecked((uint)gid):X8})  " +
+                        $"ClientId={c.ClientId}  HostId={c.HostId}  " +
+                        $"NetworkMode={c.NetworkMode}  GameState={c.GameState}");
+                }
+            }
+            catch (Exception e)
+            {
+                Plugin.L.LogError($"  [CLIENT] 读取失败: {e.Message}");
+                enabled = false;
+            }
+        }
+    }
+}

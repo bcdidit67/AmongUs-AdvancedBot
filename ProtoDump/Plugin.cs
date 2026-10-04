@@ -3,6 +3,7 @@ using System.Reflection;
 using BepInEx;
 using BepInEx.Logging;
 using BepInEx.Unity.IL2CPP;
+using HarmonyLib;
 using Il2CppInterop.Runtime.Injection;
 using InnerNet;
 using UnityEngine;
@@ -36,6 +37,7 @@ namespace ProtoDump
             DumpRpcCalls();
             DumpGameDataTypes();
             DumpVersion();
+            DumpDisconnectReasons();
 
             // 客户端状态（GameId 等）需要延迟到进房后才有值
             try
@@ -48,6 +50,15 @@ namespace ProtoDump
             {
                 L.LogError($"[ProtoDump] 挂载 ClientWatcher 失败: {e}");
             }
+
+            try
+            {
+                var h = new Harmony("com.smartlocal.protodump.packets");
+                h.PatchAll(typeof(PacketWatch).Assembly);
+                h.PatchAll(typeof(RawWatch).Assembly);
+                L.LogInfo("[ProtoDump] PacketWatch 补丁已挂载（入站包观测）");
+            }
+            catch (Exception e) { L.LogError($"[ProtoDump] Harmony 补丁失败: {e}"); }
 
             L.LogInfo("════════ ProtoDump 导出完毕 ════════");
         }
@@ -125,6 +136,32 @@ namespace ProtoDump
             try { L.LogInfo($"  [VER] MODDER_VERSION = {Constants.MODDER_VERSION}"); } catch { }
         }
 
+
+        /// <summary>
+        /// ★ DisconnectReasons 的运行期数值 —— 服务端回给我们 0x03，
+        /// 必须知道它到底代表哪个原因（GameStarted？GameNotFound？）。
+        /// 枚举的声明顺序不等于数值顺序，所以只能运行期读。
+        /// </summary>
+        private static void DumpDisconnectReasons()
+        {
+            L.LogInfo("──── DisconnectReasons（断开原因码）────");
+            try
+            {
+                var t = Type.GetType("DisconnectReasons, Assembly-CSharp")
+                     ?? Type.GetType("InnerNet.DisconnectReasons, Assembly-CSharp");
+                if (t == null) { L.LogWarning("  找不到 DisconnectReasons"); return; }
+                int n = 0;
+                foreach (var v in Enum.GetValues(t))
+                {
+                    int num = Convert.ToInt32(v);
+                    L.LogInfo("  [DCR] " + num.ToString().PadLeft(4) + " = " + v);
+                    n++;
+                }
+                L.LogInfo($"  → 共 {n} 个原因码");
+            }
+            catch (Exception e) { L.LogError($"  DisconnectReasons 失败: {e.Message}"); }
+        }
+
         /// <summary>RpcCalls 枚举的全部取值（元数据里其实有，这里做交叉验证）</summary>
         private static void DumpRpcCalls()
         {
@@ -183,6 +220,8 @@ namespace ProtoDump
 
         private void Update()
         {
+            RawWatch.Tick(Time.deltaTime);   // 内部每 2 秒 flush 一次
+
             _t += Time.deltaTime;
             if (_t < 2f) return;
             _t = 0f;

@@ -149,18 +149,47 @@ namespace BotClient
         }
 
         // ───────────────────────── 构造 ─────────────────────────
+        /// <summary>
+        /// 构造 Hello 载荷。
+        ///
+        /// ★ 结构来自**实测抓包**（ProtoDump hook 住 UnityUdpClientConnection.ConnectAsync
+        /// 捕获的真实客户端载荷），不是文档 —— 2020 年的文档说「版本 + 用户名」只有
+        /// 11 字节，而 v19 实际是 41 字节，多了 3 个字段和 1 个字符串。
+        ///
+        /// 我们最初发的短载荷会被服务端**静默忽略**（解析失败 → 不回 Hello 挑战 →
+        /// 连接永远不完整 → 应用层永不派发）。这就是困扰多轮的根因。
+        ///
+        /// 实测抓到的原始字节：
+        ///   B0 10 05 03 | 0A "Fellpillow" | 00 00 00 00 | 0D 00 00 00 |
+        ///   01 | 09 00 02 | 08 "TESTNAME" | 00 00 00 00 00
+        /// </summary>
         private static byte[] BuildHello(ushort nonce, int version, string username)
         {
             using var ms = new System.IO.MemoryStream();
-            ms.WriteByte(0x08);
-            ms.WriteByte((byte)(nonce >> 8));
+            ms.WriteByte(0x08);                                  // SendOption = Hello
+            ms.WriteByte((byte)(nonce >> 8));                    // nonce 大端
             ms.WriteByte((byte)(nonce & 0xFF));
-            ms.WriteByte(0x00);                       // Hazel 版本
-            var v = BitConverter.GetBytes(version);
+            ms.WriteByte(0x00);                                  // Hazel 版本指示字节
+
+            var v = BitConverter.GetBytes(version);              // 客户端版本 int32 小端
             ms.Write(v, 0, 4);
-            var nm = Encoding.UTF8.GetBytes(username);
+
+            var nm = Encoding.UTF8.GetBytes(username);           // 用户名：1 字节长度前缀
             ms.WriteByte((byte)nm.Length);
             ms.Write(nm, 0, nm.Length);
+
+            // ── 以下为 v19 新增字段（照抄实测结构）──
+            ms.Write(new byte[] { 0x00, 0x00, 0x00, 0x00 }, 0, 4);
+            ms.Write(new byte[] { 0x0D, 0x00, 0x00, 0x00 }, 0, 4);
+            ms.WriteByte(0x01);
+            ms.Write(new byte[] { 0x09, 0x00, 0x02 }, 0, 3);
+
+            var tag = Encoding.UTF8.GetBytes("TESTNAME");        // 第二个字符串
+            ms.WriteByte((byte)tag.Length);
+            ms.Write(tag, 0, tag.Length);
+
+            ms.Write(new byte[] { 0x00, 0x00, 0x00, 0x00, 0x00 }, 0, 5);
+
             return ms.ToArray();
         }
 

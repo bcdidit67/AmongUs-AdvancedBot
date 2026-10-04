@@ -35,6 +35,7 @@ namespace ProtoDump
             DumpTags();
             DumpRpcCalls();
             DumpGameDataTypes();
+            DumpVersion();
 
             // 客户端状态（GameId 等）需要延迟到进房后才有值
             try
@@ -77,6 +78,51 @@ namespace ProtoDump
                 L.LogInfo($"  → 共 {n} 个标签");
             }
             catch (Exception e) { L.LogError($"  Tags 反射失败: {e}"); }
+        }
+
+        /// <summary>
+        /// ★ 客户端版本号 —— 外置 bot 客户端做 Hello 握手时**必须**携带的值。
+        ///
+        /// 实测：用文档样例的 2020.9.7 (50516550) 能收到服务端的 Acknowledgement
+        /// 和被正确解析的回应，但**始终收不到 JoinedGame** —— 加入被拒。
+        /// 版本不匹配是最可能的原因，所以必须读出真值。
+        ///
+        /// 编码公式（文档）：version = year*25000 + month*1800 + day*50 + revision
+        /// </summary>
+        private static void DumpVersion()
+        {
+            L.LogInfo("──── Constants 版本号（Hello 握手必需）────");
+            try
+            {
+                int bv = Constants.GetBroadcastVersion();
+                L.LogInfo($"  [VER] ★ BroadcastVersion = {bv} (0x{unchecked((uint)bv):X8})");
+
+                // 反解成人类可读，验证编码公式
+                int v = bv;
+                int year = v / 25000; v %= 25000;
+                int month = v / 1800; v %= 1800;
+                int day = v / 50;
+                int rev = v % 50;
+                L.LogInfo($"  [VER]   解码 = {year}.{month}.{day}.{rev}");
+            }
+            catch (Exception e) { L.LogError($"  [VER] GetBroadcastVersion 失败: {e.Message}"); }
+
+            try
+            {
+                var cv = Constants.CompatVersions;
+                if (cv != null)
+                {
+                    L.LogInfo($"  [VER] CompatVersions 共 {cv.Length} 个:");
+                    for (int i = 0; i < cv.Length; i++)
+                        L.LogInfo($"    [VER]   [{i}] = {cv[i]}");
+                }
+                else L.LogWarning("  [VER] CompatVersions 为 null");
+            }
+            catch (Exception e) { L.LogWarning($"  [VER] CompatVersions 失败: {e.Message}"); }
+
+            try { L.LogInfo($"  [VER] extraBuildVersionInfo = '{Constants.extraBuildVersionInfo}'"); } catch { }
+            try { L.LogInfo($"  [VER] pipelineBuildNumber = {Constants.pipelineBuildNumber}"); } catch { }
+            try { L.LogInfo($"  [VER] MODDER_VERSION = {Constants.MODDER_VERSION}"); } catch { }
         }
 
         /// <summary>RpcCalls 枚举的全部取值（元数据里其实有，这里做交叉验证）</summary>

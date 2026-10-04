@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net6.0</TargetFramework>
+    <AssemblyName>BotClient</AssemblyName>
+    <RootNamespace>BotClient</RootNamespace>
+    <LangVersion>latest</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+</Project>

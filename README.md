@@ -90,9 +90,36 @@
 | 5 | `JoinGame` | ✅ 房主分配 clientId |
 | 6 | 报到与场景切换 | ✅ `ClientInfo` / `SceneChange` |
 | 7 | **被承认为真玩家** | ✅ **`GameData.AddPlayer` 被调用，玩家数 2/15** |
-| 8 | 名字 / 颜色显示 | 🔧 已定位：房主建的桩对象 `netId=0` 与自建对象 `netId=8` 对不上 |
-| 9 | 位置同步 | ⬜ 未开始 |
-| 10 | AI 行为 | ⬜ 未开始（纯 C#，不受引擎束缚） |
+| 8 | 名字 / 颜色显示 | ✅ **完成**（`CheckName`/`CheckColor` + 正确的 netId） |
+| 9 | 位置同步 | ✅ **完成**（`CustomNetworkTransform` 位置包，角色会走动） |
+| 10 | 长时间稳定性 | 🔧 **未完成** —— 待 1-2 分钟后房主以 `Timeout while waiting for other player data` 断开 |
+| 11 | 碰撞 / 动画 | ⬜ 未开始（位置接管绕过物理，会穿墙；未发动画状态） |
+| 12 | AI 行为 | ⬜ 未开始（纯 C#，不受引擎束缚） |
+
+### 已实测通过的完整链路
+
+```
+Hello(42B) → JoinGame → ClientInfo → SceneChange(自己的clientId)
+  → 房主 CoOnPlayerChangedScene → GameData.AddPlayer     【玩家计数 2/15】
+  → 房主 GameDataTo 发来我们角色的 Spawn
+  → 解析 netId / CNT netId / 初始坐标
+  → CheckName/CheckColor → 房主 UpdateName                【名字 + 颜色】
+  → CustomNetworkTransform 位置包（5Hz）                  【会移动】
+```
+
+### 未完成项：长时间稳定性
+
+**症状**：人机加入后一切正常，但 1-2 分钟后房主以
+`HandleDisconnect reason=Error text='Timeout while waiting for other player data'` 断开。
+
+**注意**：**这正是路线 A（假人）当年卡了 17 轮的同一条报错** —— 区别在于
+人机方案有真实连接可查、有真实客户端序列可对比，所以它是可收敛的。
+
+**已排除**：`SetActivePodType(0x15)`（补上后报错依旧；且房主的 `[PKT]` 显示它没收到）。
+
+**下一步**：报错来源已定位到
+`AmongUsClient.WaitWithTimeout(Func<bool> success, string errorMessage, int durationSeconds)`
+—— hook 它即可看到房主在等哪个条件。
 
 **两个已解决的关键 bug**（都记在对应 commit 里）：
 

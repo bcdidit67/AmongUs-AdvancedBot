@@ -36,6 +36,11 @@ namespace BotClient
         private static int _forcePid = -1;
         private static int _rpcTarget = -1;   // >=0 时 SetName/SetColor 打这个 netId
         private static int _ourNetId = -1;
+        private static int _cntNetId = -1;
+        private static float _posX, _posY;
+        private static ushort _seq;
+        private static bool _moving;
+        private static int _dir = 1;   // 1=右, -1=左
         private static int _myClientId = -1;
         private static int _playerId = -1;   // >=0 时强制使用该 playerId
         private static byte _color = 0x02;   // 2 = GREEN，避开红色
@@ -90,6 +95,11 @@ namespace BotClient
 
             // 2. JoinGame
             SendRaw("JoinGame", BuildJoinGame(gameId));
+
+            // 2.5 ★ SetActivePodType —— 真实客户端在 JoinGame 之后立刻发这个，
+            //     之前漏了，房主最终以 "Timeout while waiting for other player data" 踢人。
+            Thread.Sleep(120);
+            SendRaw("SetActivePodType", BuildSetActivePodType("pods/empty"));
 
             // 3. 保活循环
             //    ★ 已加入后不再重发 JoinGame —— 之前每重发一次，房主就当成一个新客户端，
@@ -410,25 +420,138 @@ namespace BotClient
                 i++;                                   // flags
                 uint ncomp = ReadPacked(d, ref i);
 
-                Console.WriteLine($"      ★★★ Spawn: type={st} owner={owner} components={ncomp}");
+                if (st != 4 || owner != (uint)_myClientId) return;
 
-                // SpawnType=4 是玩家；但我们把所有权重都记下来，便于判断
+                Console.WriteLine($"      ★★★ 我的玩家 Spawn: components={ncomp}");
                 if (ncomp < 1 || i >= end) return;
-                uint netId = ReadPacked(d, ref i);
-                Console.WriteLine($"      ★★★ 该对象首个组件 netId = {netId}");
 
-                // ★ 必须按 owner 匹配 —— 只认「第一个 type=4」会选中房主自己的角色！
-                //   实测：房主的玩家 owner=8 netId=4；我们的玩家 owner=9 netId=9。
-                if (_ourNetId < 0 && st == 4 && owner == (uint)_myClientId)
+                int[] ids = new int[ncomp];
+                for (int c = 0; c < ncomp && i < end; c++)
                 {
-                    _ourNetId = (int)netId;
-                    Console.WriteLine($"      ★★★ 认定这是分配给我的玩家对象: owner={owner} netId={_ourNetId}");
+                    ids[c] = (int)ReadPacked(d, ref i);
+                    if (i + 2 > end) break;
+                    int mlen = d[i] | (d[i + 1] << 8); i += 2;
+                    if (i >= end) break;
+                    byte mtag = d[i]; i++;             // 组件消息 tag
+                    int mstart = i;
+
+                    Console.WriteLine($"        组件[{c}] netId={ids[c]} msgLen={mlen} tag=0x{mtag:X2}");
+
+                    // 第 3 个组件是 CustomNetworkTransform，里面带着初始坐标
+                    if (c == 2 && mlen >= 6)
+                    {
+                        int seq = d[mstart] | (d[mstart + 1] << 8);
+                        // 之后是 flags(1) + 位置(4) —— 与抓包一致
+                        int off = mstart + 2;
+                        if (off < d.Length && (d[off] == 0x01 || d[off] == 0x00)) off++;
+                        if (off + 4 <= d.Length)
+                        {
+                            int rx = d[off] | (d[off + 1] << 8);
+                            int ry = d[off + 2] | (d[off + 3] << 8);
+                            _posX = (float)(rx / 65535.0 * 100.0 - 50.0);
+                            _posY = (float)(ry / 65535.0 * 100.0 - 50.0);
+                            _seq = (ushort)seq;
+                            Console.WriteLine($"        ★ 初始坐标: ({_posX:F2}, {_posY:F2})  seq={_seq}  [raw {rx},{ry}]");
+                        }
+                    }
+                    i = mstart + mlen;
+                }
+
+                if (ncomp >= 3)
+                {
+                    _ourNetId = ids[0];
+                    _cntNetId = ids[2];
+                    Console.WriteLine($"      ★ 玩家 netId={_ourNetId}  位置组件(CNT) netId={_cntNetId}");
+
                     Thread.Sleep(150);
                     SendRaw($"CheckName/CheckColor(netId={_ourNetId})",
                             BuildCheckNameColor(_gameId, _ourNetId, _playerId, "BotTest", _color));
+
+                    // 起一个后台线程持续向右移动
+                    if (!_moving)
+                    {
+                        _moving = true;
+                        var t = new Thread(MoveLoop) { IsBackground = true };
+                        t.Start();
+                    }
                 }
             }
             catch (Exception e) { Console.WriteLine($"      [Spawn 解析失败] {e.Message}"); }
+        }
+
+        /// <summary>
+        /// 持续发送位置更新，让角色向右走。
+        ///
+        /// CustomNetworkTransform 的数据（协议文档 + 抓包实测）：
+        ///   packed uint32  netId（CNT 组件）
+        ///   uint16         序列号（自增）
+        ///   byte           标志位（0x01 = 只含位置）
+        ///   Vector2        位置（2 × uint16）
+        ///
+        /// Vector2 编码：raw/65535 映射到 [-50, 50]，即 raw = (坐标+50)/100*65535
+        /// </summary>
+        private static void MoveLoop()
+        {
+            while (true)
+            {
+                try
+                {
+                    Thread.Sleep(200);                  // ★ 5Hz —— 原 10Hz 包量过大，会把房主冲垮
+
+                    // ★ 来回走，**绝不瞬移**。
+                    //   之前到 +40 就跳回 -40 —— 房主看到的是一次异常位移，
+                    //   加上 10Hz 的包量，直接把房主的状态机冲垮（用户被踢出游戏）。
+                    _posX += _dir * 0.25f;
+                    if (_posX > 6f)  { _posX = 6f;  _dir = -1; }   // 小范围活动，别撞地图边界
+                    if (_posX < -6f) { _posX = -6f; _dir =  1; }
+                    _seq++;
+
+                    // 只在每 5 个包打一次日志，避免刷屏
+                    if (_seq % 5 == 0)
+                        SendRaw($"位置({_posX:F1},{_posY:F1})",
+                                BuildPosition(_gameId, _cntNetId, _seq, _posX, _posY));
+                    else
+                        SendPos(BuildPosition(_gameId, _cntNetId, _seq, _posX, _posY));
+                }
+                catch (Exception e) { Console.WriteLine($"      [移动失败] {e.Message}"); return; }
+            }
+        }
+
+        /// <summary>构造 CustomNetworkTransform 的位置更新包（Normal 包）</summary>
+        private static byte[] BuildPosition(int gameId, int cntNetId, ushort seq, float x, float y)
+        {
+            var nid = PackUInt32((uint)cntNetId);
+
+            int subLen = nid.Length + 2 + 1 + 4;        // netId + seq + flags + 位置(2×uint16)
+            int gdLen = 4 + 2 + 1 + subLen;             // gameId + 子长度 + tag + 内容
+
+            using var ms = new System.IO.MemoryStream();
+            ms.WriteByte(0x00);                         // Normal 包（与抓包一致）
+            ms.WriteByte((byte)(gdLen & 0xFF));
+            ms.WriteByte((byte)((gdLen >> 8) & 0xFF));
+            ms.WriteByte(0x05);                         // GameData
+            var g = BitConverter.GetBytes(gameId); ms.Write(g, 0, 4);
+            ms.WriteByte((byte)(subLen & 0xFF));
+            ms.WriteByte((byte)((subLen >> 8) & 0xFF));
+            ms.WriteByte(0x01);                         // tag = Data
+            ms.Write(nid, 0, nid.Length);
+            ms.WriteByte((byte)(seq & 0xFF));           // 序列号（小端）
+            ms.WriteByte((byte)(seq >> 8));
+            ms.WriteByte(0x01);                         // 标志位：只含位置
+            ms.WriteByte((byte)EncX(x));
+            ms.WriteByte((byte)(EncX(x) >> 8));
+            ms.WriteByte((byte)EncX(y));
+            ms.WriteByte((byte)(EncX(y) >> 8));
+            return ms.ToArray();
+        }
+
+        /// <summary>坐标 → uint16（raw/65535 映射到 [-50,50]）</summary>
+        private static int EncX(float v)
+        {
+            float t = (v + 50f) / 100f;
+            if (t < 0f) t = 0f;
+            if (t > 1f) t = 1f;
+            return (int)(t * 65535f);
         }
 
 
@@ -681,6 +804,36 @@ namespace BotClient
         }
 
         /// <summary>
+        /// ★ SetActivePodType (0x15) —— 顶层消息，**不包在 GameData 里**。
+        ///
+        /// 实测真实客户端的加入序列里有它，而我们一直没发：
+        ///   01 00 02 0B 00 15 0A "pods/empty"
+        ///
+        /// 这是本轮排查「房主报 Timeout while waiting for other player data 并踢人」时
+        /// 通过对比真实序列找到的**唯一完全缺失的顶层消息**。
+        ///
+        /// 讽刺的是：这个报错正是路线 A（假人）当年卡了 17 轮的那一个 ——
+        /// 区别在于，假人方案根本没有真实连接可查，而人机方案能看到服务端在等什么。
+        /// </summary>
+        private static byte[] BuildSetActivePodType(string pod)
+        {
+            var nm = Encoding.UTF8.GetBytes(pod);
+            int hlen = 1 + 1 + nm.Length;              // tag + 长度字节 + 字符串
+
+            using var ms = new System.IO.MemoryStream();
+            ms.WriteByte(0x01);                        // Reliable
+            var n = NextNonce();
+            ms.WriteByte((byte)(n >> 8));
+            ms.WriteByte((byte)(n & 0xFF));
+            ms.WriteByte((byte)(hlen & 0xFF));         // Hazel 长度（小端）
+            ms.WriteByte((byte)((hlen >> 8) & 0xFF));
+            ms.WriteByte(0x15);                        // tag = SetActivePodType
+            ms.WriteByte((byte)nm.Length);
+            ms.Write(nm, 0, nm.Length);
+            return ms.ToArray();
+        }
+
+        /// <summary>
         /// ★ ClientInfo (0xCD) —— 加入后必须发的「报到」消息。
         ///
         /// 格式（协议文档 + 实测）：
@@ -740,6 +893,13 @@ namespace BotClient
         /// <summary>Acknowledgement: [0x0A][uint16 BE nonce][byte flags=0xFF]</summary>
         private static byte[] BuildAck(ushort nonce) =>
             new byte[] { 0x0A, (byte)(nonce >> 8), (byte)(nonce & 0xFF), 0xFF };
+
+
+        /// <summary>静默发送（不打印日志）—— 位置包频率高，全打会刷屏</summary>
+        private static void SendPos(byte[] pkt)
+        {
+            try { lock (_udp) _udp.Send(pkt, pkt.Length); } catch { }
+        }
 
         private static void SendRaw(string label, byte[] pkt)
         {

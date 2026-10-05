@@ -56,8 +56,6 @@
 
 ## 路线 A（假人注入）状态
 
-## 当前状态
-
 | 阶段 | 内容 | 状态 |
 |---|---|---|
 | 0.5 | API 签名调研（逆向 `Assembly-CSharp.dll`） | ✅ 完成，见 [`SmartLocal/REPORT.md`](SmartLocal/REPORT.md) |

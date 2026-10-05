@@ -1,0 +1,86 @@
+# Among Us v19 真实客户端加入序列（出站抓包，已去重）
+# 来源: ProtoDump hook UnityUdpClientConnection.WriteBytesToConnection
+# 包类型: 0x00 Normal | 0x01 Reliable | 0x08 Hello | 0x0A Ack | 0x0C Ping
+# GameData子消息: 0x01 Data | 0x02 RPC | 0x04 Spawn | 0x06 SceneChange | 0xCD ClientInfo
+# RpcCalls: 6=SetName  8=SetColor  18=SetStartCounter
+
+PKT #1     45B  type=0x08
+      08 00 00 00 B0 10 05 03 0A 46 65 6C 6C 70 69 6C 6C 6F 77 00 00 00 00 0D 00 00 00 02 09 00 02 08 54 45 53 54 4E 41 4D 45 00 00 00 00 00
+PKT #3    172B  type=0x01
+      01 00 01 A6 00 00 98 01 0C 94 00 00 01 00 64 0F 00 01 00 00 00 00 00 30 40 00 00 00 40 00 00 00 40 00 00 20 41 01 01 02 01 00 00 00 03 01 00 00 00 00 78 00 00 00 00 00 01 01 00 00 00 0B 05 00 00 00 03 00 00 00 0A 08 02 00 00 00 02 00 00 0F 05 04 00 00 00 03 00 00 3C 0A 00 03 00 00 00 02
+PKT #5      4B  type=0x0A
+      0A 00 00 FF
+PKT #7     11B  type=0x01
+      01 00 02 05 00 01 20 00 00 00 00
+PKT #9      4B  type=0x0A
+      0A 00 01 FF
+PKT #11    17B  type=0x01
+      01 00 03 0B 00 15 0A 70 6F 64 73 2F 65 6D 70 74 79
+PKT #13    25B  type=0x01
+      01 00 04 13 00 05 20 00 00 00 0C 00 06 02 0A 4F 6E 6C 69 6E 65 47 61 6D 65
+PKT #15   381B  type=0x01
+      01 00 05 77 01 05 20 00 00 00 0D 00 04 0C FE FF FF FF 0F 00 01 01 01 00 01 00 B5 00 04 0A FE FF FF FF 0F 00 01 02 A9 00 01 00 00 00 00 00 01 00 00 02 00 00 03 9A 00 04 98 01 0C 94 00 00 01 00 64 0F 00 01 00 00 00 00 00 30 40 00 00 00 40 00 00 00 40 00 00 20 41 01 01 02 01 00 00 00 03 01
+PKT #17    19B  type=0x00
+      00 0F 00 05 20 00 00 00 08 00 01 06 01 00 01 FF 7F FF 7F
+PKT #19    81B  type=0x01
+      01 00 06 4B 00 05 20 00 00 00 11 00 02 04 06 03 00 00 00 0A 46 65 6C 6C 70 69 6C 6C 6F 77 07 00 02 04 08 03 00 00 00 00 04 00 02 04 29 00 01 04 00 02 04 27 00 01 04 00 02 04 28 00 01 04 00 02 04 2A 00 01 04 00 02 04 2B 00 01 03 00 02 04 26 18
+PKT #21    95B  type=0x01
+      01 00 07 59 00 05 20 00 00 00 52 00 01 03 00 02 01 00 0A 46 65 6C 6C 70 69 6C 6C 6F 77 00 00 00 00 00 00 01 01 01 01 01 18 00 00 00 00 00 0F 75 6E 6C 69 6B 65 73 61 6B 65 23 37 37 30 31 20 30 30 30 32 35 30 32 34 65 38 39 30 34 35 64 63 62 30 36 61 63 38 33 64 35 62 30 33 33 30 32 66
+PKT #23     4B  type=0x0A
+      0A 00 02 FF
+PKT #25     3B  type=0x0C
+      0C 00 08
+PKT #27     3B  type=0x0C
+      0C 00 09
+PKT #29     4B  type=0x0A
+      0A 00 03 FF
+PKT #31    19B  type=0x00
+      00 0F 00 05 20 00 00 00 08 00 01 06 03 00 01 F6 7B 11 86
+PKT #33    19B  type=0x00
+      00 0F 00 05 20 00 00 00 08 00 01 06 04 00 01 F6 7B 11 86
+PKT #35    19B  type=0x00
+      00 0F 00 05 20 00 00 00 08 00 01 06 05 00 01 F6 7B 11 86
+PKT #37     3B  type=0x0C
+      0C 00 0A
+PKT #39     4B  type=0x0A
+      0A 00 04 FF
+PKT #41     3B  type=0x0C
+      0C 00 0B
+PKT #43     3B  type=0x0C
+      0C 00 0C
+PKT #45     4B  type=0x0A
+      0A 00 05 FF
+PKT #47     3B  type=0x0C
+      0C 00 0D
+PKT #49     4B  type=0x0A
+      0A 00 06 FF
+PKT #51     3B  type=0x0C
+      0C 00 0E
+PKT #53     3B  type=0x0C
+      0C 00 0F
+PKT #55     4B  type=0x0A
+      0A 00 07 FF
+PKT #57     3B  type=0x0C
+      0C 00 10
+PKT #59     4B  type=0x0A
+      0A 00 08 FF
+PKT #61     3B  type=0x0C
+      0C 00 11
+PKT #63     3B  type=0x0C
+      0C 00 12
+PKT #65     4B  type=0x0A
+      0A 00 09 FF
+PKT #67     3B  type=0x0C
+      0C 00 13
+PKT #69     4B  type=0x0A
+      0A 00 0A FF
+PKT #71     3B  type=0x0C
+      0C 00 14
+PKT #73     3B  type=0x0C
+      0C 00 15
+PKT #75     4B  type=0x0A
+      0A 00 0B FF
+PKT #77     3B  type=0x0C
+      0C 00 16
+PKT #79     4B  type=0x0A
+      0A 00 0C FF

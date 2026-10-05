@@ -71,6 +71,47 @@ namespace ProtoDump
 
 
 
+
+        // ═══════════════════════════════════════════════════════════
+        // ★★★ 客户端出站包的咽喉 ★★★
+        //
+        // WriteBytesToConnection 是 UnityUdpClientConnection 上**每一个出站字节**
+        // 的必经之路 —— 包括 JoinGame 之后游戏自己发的 ClientInfo 报到消息。
+        //
+        // ⚠️ 这是最热的路径，安全措施最严：
+        //   · 只捕获「启动后的前 80 个包」（握手阶段），之后永久关闭
+        //   · 零 I/O，只往内存 StringBuilder 里追加
+        //   · 每 2 秒批量 flush
+        // ═══════════════════════════════════════════════════════════
+        private static int _outCount;
+        private static bool _outDone;
+        private const int MaxOut = 80;
+
+        [HarmonyPatch(typeof(Hazel.Udp.UnityUdpClientConnection), nameof(Hazel.Udp.UnityUdpClientConnection.WriteBytesToConnection))]
+        internal static class Patch_WriteBytes
+        {
+            [HarmonyPrefix]
+            private static void Prefix(Il2CppInterop.Runtime.InteropTypes.Arrays.Il2CppStructArray<byte> bytes, int length)
+            {
+                try
+                {
+                    if (_outDone || bytes == null) return;
+                    if (++_outCount > MaxOut) { _outDone = true; return; }
+
+                    var sb = new StringBuilder();
+                    int n = length > 0 && length <= bytes.Length ? length : bytes.Length;
+                    for (int i = 0; i < n && i < 512; i++) sb.Append(bytes[i].ToString("X2")).Append(' ');
+
+                    lock (_lock)
+                    {
+                        byte t = bytes[0];
+                        _pending.AppendLine($"  [OUT] #{_outCount} {n}B type=0x{t:X2}: {sb.ToString().TrimEnd()}");
+                    }
+                }
+                catch { }
+            }
+        }
+
         // ═══════════════════════════════════════════════════════════
         // ★★★ 真正的 Hello 捕获点 ★★★
         //

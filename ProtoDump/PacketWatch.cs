@@ -23,6 +23,7 @@ namespace ProtoDump
     {
         private static int _count;
         private static float _lastLog;
+        private static int _subLogged;
 
         internal static string TagName(byte t) => t switch
         {
@@ -62,7 +63,14 @@ namespace ProtoDump
             }
         }
 
-                [HarmonyPatch(typeof(InnerNetClient), nameof(InnerNetClient.HandleMessage))]
+                internal static string SubName(byte t) => t switch
+        {
+            0x01 => "Data", 0x02 => "RPC", 0x04 => "★Spawn", 0x05 => "Despawn",
+            0x06 => "SceneChange", 0x07 => "Ready", 0x08 => "ChangeSettings",
+            0xcd => "ClientInfo", _ => "?"
+        };
+
+        [HarmonyPatch(typeof(InnerNetClient), nameof(InnerNetClient.HandleMessage))]
         internal static class Patch_HandleMessage
         {
             [HarmonyPrefix]
@@ -73,8 +81,37 @@ namespace ProtoDump
                     if (reader == null) return;
                     byte tag = reader.Tag;
 
-                    // GameData 太频繁，只统计不逐条打
-                    if (tag == 0x05 || tag == 0x06) { _count++; return; }
+                    // GameData 太频繁，只统计；但**把子消息 tag 也记下来**
+                    // —— Spawn(0x04) 就藏在 GameData 里，之前完全看不见。
+                    if (tag == 0x05 || tag == 0x06)
+                    {
+                        _count++;
+                        if (_subLogged < 40 && reader.BytesRemaining >= 8)
+                        {
+                            _subLogged++;
+                            string subs = "";
+                            try
+                            {
+                                var r = reader;
+                                int pos = r.Offset;
+                                var buf = r.Buffer;
+                                int end = Math.Min(buf.Length, pos + Math.Min(r.BytesRemaining, 48));
+                                for (int i = pos + 4; i + 2 <= end; )
+                                {
+                                    int slen = buf[i] | (buf[i+1] << 8);
+                                    if (i + 2 >= end) break;
+                                    byte stag = buf[i+2];
+                                    subs += $" tag=0x{stag:X2}({SubName(stag)})[{slen}]";
+                                    i += 2 + 1 + slen;
+                                    if (slen == 0) break;
+                                }
+                            }
+                            catch { }
+                            if (subs.Length > 0)
+                                Plugin.L.LogWarning($"[PKT] ← GameData 子消息:{subs}");
+                        }
+                        return;
+                    }
 
                     Plugin.L.LogInfo(
                         $"[PKT] ← tag=0x{tag:X2} ({TagName(tag)})  opt={sendOption}  " +

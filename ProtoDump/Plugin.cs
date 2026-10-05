@@ -56,6 +56,10 @@ namespace ProtoDump
                 var h = new Harmony("com.smartlocal.protodump.packets");
                 h.PatchAll(typeof(PacketWatch).Assembly);
                 h.PatchAll(typeof(RawWatch).Assembly);
+                h.PatchAll(typeof(VersionOverride).Assembly);
+                h.PatchAll(typeof(PlayerInfoWatch).Assembly);
+                L.LogInfo("[ProtoDump] PlayerInfoWatch 已挂载（AddPlayer 观测）");
+                L.LogInfo("[ProtoDump] VersionOverride 已挂载（版本号可伪装）");
                 L.LogInfo("[ProtoDump] PacketWatch 补丁已挂载（入站包观测）");
             }
             catch (Exception e) { L.LogError($"[ProtoDump] Harmony 补丁失败: {e}"); }
@@ -221,6 +225,8 @@ namespace ProtoDump
         private void Update()
         {
             RawWatch.Tick(Time.deltaTime);   // 内部每 2 秒 flush 一次
+            PlayerInfoWatch.Tick(Time.deltaTime);
+            PlayerInfoWatch.TickPrefab(Time.deltaTime);
 
             _t += Time.deltaTime;
             if (_t < 2f) return;

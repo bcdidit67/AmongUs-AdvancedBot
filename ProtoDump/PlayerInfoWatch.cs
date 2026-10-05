@@ -173,6 +173,59 @@ namespace ProtoDump
             }
         }
 
+
+        // ═══════════════════════════════════════════════════════════
+        // ★ NetId 分配观测 —— 解释「RPC 打到 netId=8 却无效」
+        //
+        // InnerNetClient.FindObjectByNetId<T>(netId) 是 RPC 分发的查表入口，
+        // 说明房主收到 RPC 后是**按 netId 找对象**的：找不到就丢弃。
+        //
+        // 而房主为我们建的 PlayerControl 是 pc.NetId=0（疑似 InvalidNetId），
+        // 我们的 RPC 却打在自建对象的 netId=8 上 —— 两者对不上。
+        //
+        // 这里要确认的是：房主到底有没有给我们的角色分配过 netId。
+        // ⚠️ setter 可能被高频调用，所以只记 PlayerControl，且总量封顶。
+        // ═══════════════════════════════════════════════════════════
+        private static int _netIdLogged;
+
+        [HarmonyPatch(typeof(InnerNetObject), nameof(InnerNetObject.NetId), MethodType.Setter)]
+        internal static class Patch_NetIdSetter
+        {
+            // ⚠️ 不能声明原方法的参数 —— set_NetId 的参数在 interop 里**没有名字**，
+            //    Harmony 按名字绑定会报 Parameter "value" not found。
+            //    改用 Postfix + __instance：此时读到的就是**赋值后**的新值。
+            [HarmonyPostfix]
+            private static void Postfix(InnerNetObject __instance)
+            {
+                try
+                {
+                    if (_netIdLogged >= 30) return;
+                    if (__instance == null) return;
+
+                    // 只关心玩家对象
+                    PlayerControl pc = null;
+                    try { pc = __instance.TryCast<PlayerControl>(); } catch { }
+                    if (pc == null) return;
+
+                    _netIdLogged++;
+                    Plugin.L.LogWarning(
+                        $"[GDP] ★ NetId 赋值: PlayerControl netId={__instance.NetId} " +
+                        $"playerId={pc.PlayerId} owner={pc.OwnerId} (NetIdCnt={AmongUsClient.Instance?.NetIdCnt})");
+                }
+                catch { }
+            }
+        }
+
+        /// <summary>启动时打印 InvalidNetId 的值 —— 判断 pc.NetId=0 是不是「未分配」</summary>
+        internal static void DumpInvalidNetId()
+        {
+            try
+            {
+                Plugin.L.LogInfo($"[GDP] InvalidNetId = {InnerNet.NetId.InvalidNetId}");
+            }
+            catch (Exception e) { Plugin.L.LogWarning($"[GDP] InvalidNetId 读取失败: {e.Message}"); }
+        }
+
         /// <summary>定期汇报玩家表规模 —— 看机器人有没有被算进去</summary>
         private static float _t;
         internal static void Tick(float dt)

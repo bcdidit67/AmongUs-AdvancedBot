@@ -64,6 +64,22 @@ namespace BotClient
             _udp.Client.ReceiveTimeout = 500;
             _udp.Connect(Host, Port);
 
+            // ★ 优雅退出：被 kill / Ctrl+C 时先发一个 Disconnect，
+            //   否则房主会留下一个「没有名字的幽灵条目」，
+            //   累积几次就会把房主自己的状态机搞崩（实测被踢出游戏）。
+            AppDomain.CurrentDomain.ProcessExit += (s, e) =>
+            {
+                try
+                {
+                    // SendOption 0x09 = Disconnect
+                    var bye = new byte[] { 0x09 };
+                    lock (_udp) _udp.Send(bye, bye.Length);
+                    Console.WriteLine("[退出] 已发送 Disconnect，房主会清理该条目");
+                    Thread.Sleep(300);
+                }
+                catch { }
+            };
+
             // 后台接收线程
             var rx = new Thread(ReceiveLoop) { IsBackground = true };
             rx.Start();
@@ -125,6 +141,13 @@ namespace BotClient
                 var sb = new StringBuilder();
                 sb.Append($"[收] 0x{so:X2} {name}  {d.Length}B: {Hex(d)}");
 
+                // ★ 把非保活包的原生字节单独打一份，便于逐字段分析
+                //   （之前只打 tag/len，看不出解析错位在哪）
+                if (so != 0x0C && so != 0x0A)
+                {
+                    Console.WriteLine($"      [RAW-IN] {Hex(d, 0, Math.Min(d.Length, 120))}");
+                }
+
                 // ── 保活应答 ──
                 if (so == 0x0c && d.Length >= 3)          // Ping → 回 Ack
                 {
@@ -141,6 +164,10 @@ namespace BotClient
                 else if (so == 0x00)                      // Normal
                 {
                     AppendMessages(sb, d, 1);
+                    HandleSubMessages(d, 1);              // ★ Normal 包也要解析！
+                                                          //   之前只在 Reliable 上跑，
+                                                          //   而房主很可能把 Spawn 放在 Normal 里发，
+                                                          //   导致我们一直看不到自己角色的 netId。
                 }
                 else if (so == 0x08)                      // 服务端 Hello
                 {
@@ -159,7 +186,18 @@ namespace BotClient
             }
         }
 
-        private static void AppendMessages(StringBuilder sb, byte[] d, int pos)
+        /// <summary>
+        /// 解析外层 Hazel 消息。
+        ///
+        /// ★★★ 关键：外层包类型里有两个容易混淆的 0x06 ★★★
+        ///   InnerNet.Tags.GameDataTo = 0x06   （包类型：定向发给某客户端，后面多一个目标 clientId）
+        ///   GameData 子消息 SceneChange = 0x06 （子消息类型）
+        ///
+        /// 之前把外层 0x06 当成「SceneChange 子消息」解析，导致后续全部错位 ——
+        /// 而房主正是用 GameDataTo 把「分配给你的角色」的 Spawn 发给我们的，
+        /// 所以一直看不到自己角色的 netId，名字也就永远设不上。
+        /// </summary>
+        private static void AppendMessages(StringBuilder sb, byte[] d, int pos, bool isGameDataTo = false)
         {
             while (pos + 2 <= d.Length)
             {
@@ -167,10 +205,54 @@ namespace BotClient
                 pos += 2;
                 if (pos >= d.Length) break;
                 byte tag = d[pos]; pos++;
-                sb.Append($"\n      └ tag=0x{tag:X2} ({TagName(tag)}) len={len}");
-                if (len > 0 && pos + len <= d.Length)
-                    sb.Append($" payload={Hex(d, pos, len)}");
+
+                string tn = tag switch
+                {
+                    0x05 => "★GameData", 0x06 => "★GameDataTo", _ => TagName(tag)
+                };
+                sb.Append($"\n      └ tag=0x{tag:X2} ({tn}) len={len}");
+
+                if (tag == 0x05 || tag == 0x06)
+                {
+                    // GameData 内容: gameId(4) [+ 目标clientId(1，仅 GameDataTo)] + 子消息序列
+                    int inner = pos + 4 + (tag == 0x06 ? 1 : 0);
+                    if (tag == 0x06)
+                        sb.Append($"  target={d[pos + 4]}");
+                    sb.Append("  子消息→");
+                    ParseSubs(sb, d, inner, pos + len, tag == 0x06);
+                }
+                else if (len > 0 && pos + len <= d.Length)
+                {
+                    sb.Append($" payload={Hex(d, pos, Math.Min((int)len, 48))}");
+                }
                 pos += len;
+            }
+        }
+
+        /// <summary>解析 GameData / GameDataTo 内部的子消息序列</summary>
+        private static void ParseSubs(StringBuilder sb, byte[] d, int pos, int end, bool isTo)
+        {
+            if (end > d.Length) end = d.Length;
+            while (pos + 2 <= end)
+            {
+                ushort slen = (ushort)(d[pos] | (d[pos + 1] << 8));
+                pos += 2;
+                if (pos >= end) break;
+                byte stag = d[pos]; pos++;
+                string sn = stag switch
+                {
+                    0x01 => "Data", 0x02 => "RPC", 0x04 => "★Spawn", 0x05 => "Despawn",
+                    0x06 => "SceneChange", 0x07 => "Ready", 0x08 => "ChangeSettings",
+                    0xCD => "ClientInfo", _ => "?"
+                };
+                sb.Append($" [{sn}(0x{stag:X2}) {slen}B]");
+
+                // ★ Spawn 里带的就是「房主分配给我们角色的 netId」
+                if (stag == 0x04)
+                {
+                    TryExtractOurNetId(d, pos, slen);
+                }
+                pos += slen;
             }
         }
 
@@ -190,6 +272,15 @@ namespace BotClient
                 if (pos >= d.Length) return;
                 byte tag = d[pos]; pos++;
 
+                // ★ 记录房主发来的一切（含 Spawn）——之前过滤太严，什么都没看到
+                try
+                {
+                    string tn = tag switch { 0x01=>"Data",0x02=>"RPC",0x04=>"★Spawn",0x05=>"Despawn",
+                                             0x06=>"SceneChange",0x07=>"Ready",0x08=>"ChangeSettings",
+                                             0xCD=>"ClientInfo",_=>"?" };
+                    Console.WriteLine($"      ← 房主发来: tag=0x{tag:X2}({tn}) len={len}");
+                }
+                catch { }
                 if (tag == 0x04) TryExtractOurNetId(d, pos, len);   // ★ 房主发来的 Spawn
 
                 if (tag == 0x07 && len >= 12 && pos + 12 <= d.Length)
@@ -233,20 +324,20 @@ namespace BotClient
                         //
                         // 正确做法：等房主把它生成的 Spawn 发给我们，从里面读出
                         // 它分配的 netId，再用那个 netId 发 SetName/SetColor。
-                        // ★ 自建角色 —— 必须保留 ★
+                        // ★★★ 不自建角色 ★★★
                         //
-                        // 实测对比：
-                        //   只有房主的 PlayerInfo（不自建） → 2/15 但角色显示绿色 ???
-                        //   只有自建角色（无 PlayerInfo）   → 蓝色有名字但 1/15
-                        //   **两者都要** → 完整玩家
+                        // 抓取「真实客户端加入在线房间」的序列后确认：
+                        //   真实客户端**从不发 Spawn** —— 角色由服务器生成，
+                        //   客户端拿到服务器分配的 netId 后，只用那个 netId 发 RPC。
                         //
-                        // 房主在收到我们的 SceneChange 后会调用 AddPlayer，
-                        // 而且用的正是我们声明的 playerId（观测：pc=pid=1），
-                        // 所以自建角色的 playerId 与房主的条目天然一致。
-                        SendRaw($"PlayerSpawn(playerId={pid}, netBase={_netBase})",
-                                BuildPlayerSpawn(gid, cid, pid, _netBase));
+                        //   我们的自建 Spawn 造出了一个房主不认识的对象（netId 8），
+                        //   于是所有 RPC 都打在它上面 → 房主 FindObjectByNetId 查不到
+                        //   → 全部丢弃 → 名字永远是空 → 显示 ???。
+                        //
+                        // 正确做法：等房主把「分配给你的角色」的 Spawn 发过来，
+                        // 读出里面的 netId，再对它发 CheckName/CheckColor。
+                        Console.WriteLine("      → 不自建角色（与真实客户端一致），等待房主分配 netId");
 
-                        Thread.Sleep(300);
                         int tgt = _rpcTarget >= 0 ? _rpcTarget : _netBase;
                         SendRaw($"CheckName/CheckColor(netId={tgt})",
                                 BuildCheckNameColor(gid, tgt, pid, "BotTest", _color));
@@ -306,42 +397,40 @@ namespace BotClient
         /// </summary>
         private static void TryExtractOurNetId(byte[] d, int pos, int len)
         {
-            if (_ourNetId >= 0 || len <= 3) return;
             try
             {
-                var p = new byte[len];
-                Array.Copy(d, pos, p, 0, len);
-                int i = 0;
-                uint st = ReadPacked(p, ref i);
-                uint owner = ReadPacked(p, ref i);
-                if (st != 4) return;
+                if (len <= 3) return;
+                int i = pos;
+                int end = Math.Min(d.Length, pos + len);
 
-                // ★ 不再按 owner 过滤 —— 实测房主创建的角色 OwnerId=0（不是我们的 clientId），
-                //   之前加了 owner == _myClientId 的判断，导致**从来没打印过房主发来的 Spawn**，
-                //   也就一直不知道它把角色挂在哪个 netId 上。
-                if (i >= p.Length) return;
+                // Spawn 体: packed SpawnType | packed OwnerId | byte flags | packed 组件数 | 组件...
+                uint st = ReadPacked(d, ref i);
+                uint owner = ReadPacked(d, ref i);
+                if (i >= end) return;
                 i++;                                   // flags
-                uint ncomp = ReadPacked(p, ref i);
-                if (ncomp < 1 || i >= p.Length) return;
-                uint netId = ReadPacked(p, ref i);
+                uint ncomp = ReadPacked(d, ref i);
 
-                Console.WriteLine($"      ★★★ 房主发来玩家 Spawn: netId={netId} owner={owner} components={ncomp}（我的clientId={_myClientId}）");
+                Console.WriteLine($"      ★★★ Spawn: type={st} owner={owner} components={ncomp}");
 
-                if (_ourNetId < 0)
+                // SpawnType=4 是玩家；但我们把所有权重都记下来，便于判断
+                if (ncomp < 1 || i >= end) return;
+                uint netId = ReadPacked(d, ref i);
+                Console.WriteLine($"      ★★★ 该对象首个组件 netId = {netId}");
+
+                // ★ 必须按 owner 匹配 —— 只认「第一个 type=4」会选中房主自己的角色！
+                //   实测：房主的玩家 owner=8 netId=4；我们的玩家 owner=9 netId=9。
+                if (_ourNetId < 0 && st == 4 && owner == (uint)_myClientId)
                 {
                     _ourNetId = (int)netId;
+                    Console.WriteLine($"      ★★★ 认定这是分配给我的玩家对象: owner={owner} netId={_ourNetId}");
                     Thread.Sleep(150);
-                    SendRaw($"CheckName/CheckColor(房主分配的 netId={_ourNetId})",
+                    SendRaw($"CheckName/CheckColor(netId={_ourNetId})",
                             BuildCheckNameColor(_gameId, _ourNetId, _playerId, "BotTest", _color));
                 }
-
-                // 立刻用正确的 netId 设名字和颜色
-                Thread.Sleep(150);
-                SendRaw($"SetName/SetColor(netId={_ourNetId})",
-                        BuildCheckNameColor(_gameId, _ourNetId, _playerId, "BotTest", _color));
             }
-            catch (Exception e) { Console.WriteLine($"      [netId 提取失败] {e.Message}"); }
+            catch (Exception e) { Console.WriteLine($"      [Spawn 解析失败] {e.Message}"); }
         }
+
 
         private static uint ReadPacked(byte[] b, ref int i)
         {

@@ -38,6 +38,7 @@ namespace ProtoDump
             DumpGameDataTypes();
             DumpVersion();
             DumpDisconnectReasons();
+            PlayerInfoWatch.DumpInvalidNetId();
 
             // 客户端状态（GameId 等）需要延迟到进房后才有值
             try

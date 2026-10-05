@@ -248,8 +248,8 @@ namespace BotClient
 
                         Thread.Sleep(300);
                         int tgt = _rpcTarget >= 0 ? _rpcTarget : _netBase;
-                        SendRaw($"SetName/SetColor(netId={tgt})",
-                                BuildSetNameColor(gid, tgt, pid, "BotTest", _color));
+                        SendRaw($"CheckName/CheckColor(netId={tgt})",
+                                BuildCheckNameColor(gid, tgt, pid, "BotTest", _color));
                     }
                 }
                 pos += len;
@@ -331,14 +331,14 @@ namespace BotClient
                 {
                     _ourNetId = (int)netId;
                     Thread.Sleep(150);
-                    SendRaw($"SetName/SetColor(房主分配的 netId={_ourNetId})",
-                            BuildSetNameColor(_gameId, _ourNetId, _playerId, "BotTest", _color));
+                    SendRaw($"CheckName/CheckColor(房主分配的 netId={_ourNetId})",
+                            BuildCheckNameColor(_gameId, _ourNetId, _playerId, "BotTest", _color));
                 }
 
                 // 立刻用正确的 netId 设名字和颜色
                 Thread.Sleep(150);
                 SendRaw($"SetName/SetColor(netId={_ourNetId})",
-                        BuildSetNameColor(_gameId, _ourNetId, _playerId, "BotTest", _color));
+                        BuildCheckNameColor(_gameId, _ourNetId, _playerId, "BotTest", _color));
             }
             catch (Exception e) { Console.WriteLine($"      [netId 提取失败] {e.Message}"); }
         }
@@ -476,19 +476,36 @@ namespace BotClient
         /// 结合前面解出的 RpcCalls 顺序（0=PlayAnimation … 6=SetName, 7=CheckColor, 8=SetColor）
         /// 完全吻合。
         /// </summary>
-        private static byte[] BuildSetNameColor(int gameId, int netId, int playerId, string name, byte color = 0x00)
+        /// <summary>
+        /// ★★★ 名字/颜色：必须发 CheckName(5) / CheckColor(7)，而不是 SetName(6) / SetColor(8) ★★★
+        ///
+        /// 来源：抓取「真实客户端加入在线房间」的完整出站序列
+        ///   #69  RPC netId=0A  RpcCalls=5 (CheckName)   0A "Fellpillow"
+        ///   #73  RPC netId=0A  RpcCalls=7 (CheckColor)  00
+        ///
+        /// 对照 RpcCalls 表：5=CheckName 6=SetName 7=CheckColor 8=SetColor
+        ///
+        /// 机制：**客户端发 Check*「请求校验」，房主校验通过后由房主自己设名字/颜色
+        /// 并广播 Set*」** —— 我们之前直接发 SetName，属于越权改名，
+        /// 房主不接受，所以 PlayerInfo 的名字一直是空的（显示 ???）。
+        ///
+        /// 这也解释了观测到的「UpdateName 从未被调用」：
+        /// 房主只在处理 CheckName 成功之后才会调它。
+        /// </summary>
+        private static byte[] BuildCheckNameColor(int gameId, int netId, int playerId, string name, byte color)
         {
             var nm = Encoding.UTF8.GetBytes(name);
+            var nid = PackUInt32((uint)netId);
 
-            // 子消息1: SetName
-            var r1 = new System.Collections.Generic.List<byte> { (byte)netId, 0x06 };
-            r1.AddRange(BitConverter.GetBytes(playerId));
+            // 子消息1: CheckName —— netId + RpcCalls(5) + 1字节长度 + 名字
+            var r1 = new System.Collections.Generic.List<byte>();
+            r1.AddRange(nid); r1.Add(0x05);
             r1.Add((byte)nm.Length); r1.AddRange(nm);
 
-            // 子消息2: SetColor
-            var r2 = new System.Collections.Generic.List<byte> { (byte)netId, 0x08 };
-            r2.AddRange(BitConverter.GetBytes(playerId));
-            r2.Add(color);  // 由调用方指定，避免与房主撞色
+            // 子消息2: CheckColor —— netId + RpcCalls(7) + 颜色
+            var r2 = new System.Collections.Generic.List<byte>();
+            r2.AddRange(nid); r2.Add(0x07);
+            r2.Add(color);
 
             int subs = (2 + 1 + r1.Count) + (2 + 1 + r2.Count);
             int gdLen = 4 + subs;
@@ -500,7 +517,7 @@ namespace BotClient
             ms.WriteByte((byte)(n & 0xFF));
             ms.WriteByte((byte)(gdLen & 0xFF));
             ms.WriteByte((byte)((gdLen >> 8) & 0xFF));
-            ms.WriteByte(0x05);
+            ms.WriteByte(0x05);                        // GameData
             var g = BitConverter.GetBytes(gameId); ms.Write(g, 0, 4);
             foreach (var payload in new[] { r1, r2 })
             {

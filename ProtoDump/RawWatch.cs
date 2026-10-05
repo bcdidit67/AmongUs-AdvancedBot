@@ -85,7 +85,7 @@ namespace ProtoDump
         // ═══════════════════════════════════════════════════════════
         private static int _outCount;
         private static bool _outDone;
-        private const int MaxOut = 80;
+        private const int MaxOut = 400;
 
         [HarmonyPatch(typeof(Hazel.Udp.UnityUdpClientConnection), nameof(Hazel.Udp.UnityUdpClientConnection.WriteBytesToConnection))]
         internal static class Patch_WriteBytes

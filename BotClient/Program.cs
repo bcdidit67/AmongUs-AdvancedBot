@@ -761,7 +761,17 @@ namespace BotClient
                         // 地图：可走 = layer 2 的 AreaCollider（21 个，总面积 757）
                         //       ★ 绝不能把 layer 9 的 Ground 当地板 —— 那只是贴图，
                         //         它们散落在各处，放行后会走到墙外（实测 42 个"房间"时越界）
-                        if (layer == 2)                     b.Room = true;
+                        // ★★★ 可走 = AreaCollider 与 Ground 的**交集** ★★★
+                        //
+                        // 实测（1226 个轨迹点统计）：
+                        //   在 AreaCollider 内且踩在 Ground 上   约 75%
+                        //   在 AreaCollider 内但**不在** Ground 上 约 25%  ← ★ 这些位置在墙里
+                        //     （AreaCollider 是矩形包围盒，把不规则房间补成了直角，
+                        //       补出来的那些角在真实游戏里是墙）
+                        //
+                        // 所以两层都要满足：AreaCollider 划定大范围，Ground 给出真实地板形状。
+                        if (layer == 2)                     b.Room = true;    // 区域
+                        else if (layer == 9)                b.Room = true;    // 地板（与上面取交集）
                         else if (layer == 12 && area < 20f) b.Room = false;   // 桌椅栏杆
                         else continue;
                     }
@@ -834,16 +844,36 @@ namespace BotClient
             catch (Exception e) { Console.WriteLine($"      [几何] 解析失败: {e.Message}"); return false; }
         }
 
-        /// <summary>可走：在任一房间内，且不在任何障碍内</summary>
+        /// <summary>
+        /// 可走判定。
+        ///
+        /// 大厅：在 layer 9 的房间内，且不在障碍内。
+        /// 地图：必须**同时**满足两类 ——
+        ///       ① 在某个 layer 2 的 AreaCollider 内（划定大范围）
+        ///       ② 踩在某个 layer 9 的 Ground 上（真实地板形状）
+        ///   只满足①会在墙里（AreaCollider 是矩形包围盒，把不规则房间补成了直角）——
+        ///   实测 1226 个轨迹点里有约 25% 落在这种地方。
+        /// </summary>
         private static bool Walkable(float x, float y)
         {
-            const float R = 0.35f;   // ★ 离墙余量加大（原 0.25）—— 走路时不容易蹭到墙
-            bool inRoom = false;
+            const float R = 0.35f;
+            bool inArea = false, onGround = false, hasArea = false;
             lock (_boxes)
             {
                 foreach (var b in _boxes)
-                    if (b.Room && x > b.x0 + R && x < b.x1 - R && y > b.y0 + R && y < b.y1 - R) { inRoom = true; break; }
-                if (!inRoom) return false;
+                {
+                    if (b.Layer == 2) hasArea = true;              // 本场景有没有区域层
+                    if (!b.Room) continue;
+                    if (x > b.x0 + R && x < b.x1 - R && y > b.y0 + R && y < b.y1 - R)
+                    {
+                        if (b.Layer == 2) inArea = true;
+                        else if (b.Layer == 9) onGround = true;
+                    }
+                }
+                // 地图（有 layer 2）：必须在区域**且**踩在地板上
+                // 大厅（只有 layer 9）：在地板范围内即可
+                bool ok = hasArea ? (inArea && onGround) : onGround;
+                if (!ok) return false;
                 foreach (var b in _boxes)
                     if (!b.Room && x > b.x0 - R && x < b.x1 + R && y > b.y0 - R && y < b.y1 + R) return false;
             }

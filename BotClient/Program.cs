@@ -701,6 +701,7 @@ namespace BotClient
         private static readonly System.Collections.Generic.List<Box> _boxes
             = new System.Collections.Generic.List<Box>();
         private static string _geoScene = "";
+        private static int _geoBeginLine = -1;   // 上一段 [COL] 的起始行号（用来判断是否换了一段）
         private static float _mapMinX, _mapMinY, _mapMaxX, _mapMaxY;
 
         /// <summary>读日志里**最后一段** [COL]（= 当前场景）并按房间/障碍分类</summary>
@@ -748,7 +749,11 @@ namespace BotClient
                     if (x1 > mxx) mxx = x1; if (y1 > mxy) mxy = y1;
                 }
                 if (tmp.Count == 0) return false;
-                if (scene == _geoScene) return false;        // 同一场景不重复载入
+                // ★ 和插件一样：大厅与地图都叫 "OnlineGame"，
+                //   所以不能靠场景名判断要不要重新载入。
+                //   插件在换阶段时会输出**新的一段 [COL]**，
+                //   我们只在「日志里最后一段 [COL] 的起始行号」变化时才重新载入。
+                if (begin == _geoBeginLine) return false;
 
                 // ★★★ 排除「包住其它房间的外圈」★★★
                 //
@@ -786,6 +791,7 @@ namespace BotClient
                     _mapMinX = mnx; _mapMinY = mny; _mapMaxX = mxx; _mapMaxY = mxy;
                 }
                 _geoScene = scene;
+                _geoBeginLine = begin;
                 int rooms = tmp.FindAll(b => b.Room).Count;
                 Console.WriteLine($"      ★★★ 几何载入 [{scene}]：房间 {rooms} 个，障碍 {tmp.Count - rooms} 个，" +
                                   $"范围 x[{mnx:F1},{mxx:F1}] y[{mny:F1},{mxy:F1}]");

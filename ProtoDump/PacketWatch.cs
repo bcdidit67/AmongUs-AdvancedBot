@@ -105,10 +105,23 @@ namespace ProtoDump
         {
             // ★ 场景一变就重新导出 —— 否则进地图后用的还是大厅的碰撞几何
             //   （之前只导一次，所以人机在地图里完全没有墙体约束）
-            string scene = "";
-            try { scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name ?? ""; } catch { }
-            if (string.IsNullOrEmpty(scene)) return;
-            if (_gridDumpedFor == scene) return;
+            // ★★★ 不能用场景名判断！★★★
+            //
+            // 实测：大厅和游戏地图的 SceneManager 场景名**都是 "OnlineGame"** ——
+            // 游戏只是往同一个场景里装不同内容。
+            // 所以「场景名变了才重导」这条判据永远不成立，
+            // 进了地图之后人机用的还是大厅的碰撞几何（表现为在地图里穿墙）。
+            //
+            // 改用**阶段**判断：大厅有 LobbyBehaviour，地图有 ShipStatus。
+            string phase;
+            try
+            {
+                if (ShipStatus.Instance != null) phase = "SHIP";
+                else if (LobbyBehaviour.Instance != null) phase = "LOBBY";
+                else return;
+            }
+            catch { return; }
+            if (_gridDumpedFor == phase) return;
 
             try
             {
@@ -162,8 +175,8 @@ namespace ProtoDump
                 }
                 sb.AppendLine("[GRID] END");
                 Plugin.L.LogWarning(sb.ToString());
-                _gridDumpedFor = scene;
-                Plugin.L.LogWarning($"[GRID] 场景 = {scene}");
+                _gridDumpedFor = phase;
+                Plugin.L.LogWarning($"[GRID] 阶段 = {phase}");
                 Plugin.L.LogWarning($"[GRID] ✅ 可行走网格已输出（{GW}x{GH}，格子 {CELL}，半径 {PlayerRadius}）");
 
                 // ═══════════════════════════════════════════════════════
@@ -181,7 +194,7 @@ namespace ProtoDump
                     var cols = UnityEngine.Object.FindObjectsOfType<Collider2D>();
                     var sb2 = new System.Text.StringBuilder();
                     int cnt = 0;
-                    sb2.AppendLine($"[COL] BEGIN {cols?.Length ?? 0} SCENE {scene}");
+                    sb2.AppendLine($"[COL] BEGIN {cols?.Length ?? 0} SCENE {phase}");
                     if (cols != null)
                         foreach (var c in cols)
                         {

@@ -1,0 +1,11 @@
+#!/bin/sh
+# Linux / macOS 启动包装 —— 直接 ./tui 即可
+DIR=$(cd "$(dirname "$0")" && pwd)
+if command -v python3 >/dev/null 2>&1; then
+    exec python3 "$DIR/tui.py" "$@"
+elif command -v python >/dev/null 2>&1; then
+    exec python "$DIR/tui.py" "$@"
+else
+    echo "找不到 python3，请先安装 Python 3"
+    exit 1
+fi

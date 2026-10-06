@@ -61,9 +61,14 @@
 ### 第二步：跑 TUI
 
 ```bash
-python3 tui.py        # Linux
-python tui.py         # Windows
+./tui                 # Linux / macOS （推荐）
+python3 tui.py        # Linux 备选
+
+tui.bat               # Windows （双击也行）
+py tui.py             # Windows 备选
 ```
+
+> ⚠️ Windows 的 `py` 命令在 Linux 上不存在 —— Linux 用 `python3`。
 
 你会看到：
 

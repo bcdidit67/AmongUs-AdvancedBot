@@ -59,6 +59,85 @@ namespace ProtoDump
         // ═══════════════════════════════════════════════════════════
         private static int _lastGameId = int.MinValue;
 
+
+        // ═══════════════════════════════════════════════════════════
+        // ★★★ 导出碰撞体的**真实形状**（多边形），而不是包围盒 ★★★
+        //
+        // 之前导出 collider.bounds（轴对齐矩形），把不规则形状补成了直角 ——
+        // 用户画的示意图说得很清楚：
+        //     绿色 = 正常人可走的区域（不规则）
+        //     红色 = 交界处，有墙，内部可走（灵魂能穿）
+        //     紫色 = 最外层硬墙（灵魂也穿不过）
+        // 而 AreaCollider(layer 2) 很可能就是绿色区的精确轮廓，
+        // 用矩形去近似它 → 多出来的直角部分正好是红区 → 表现为「穿墙后在墙内活动」。
+        //
+        // 输出格式：
+        //   [POLY] BEGIN <总数>
+        //   <层> <点数> x1 y1 x2 y2 ...        ← 世界坐标
+        //   [POLY] END
+        // ═══════════════════════════════════════════════════════════
+        private static void DumpPolygons()
+        {
+            try
+            {
+                var cols = UnityEngine.Object.FindObjectsOfType<Collider2D>();
+                if (cols == null) return;
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine($"[POLY] BEGIN {cols.Length}");
+                int n = 0;
+                foreach (var c in cols)
+                {
+                    if (c == null) continue;
+                    try
+                    {
+                        var pts = new System.Collections.Generic.List<Vector2>();
+                        var poly = c.TryCast<PolygonCollider2D>();
+                        var box = c.TryCast<BoxCollider2D>();
+                        var cir = c.TryCast<CircleCollider2D>();
+                        if (poly != null)
+                        {
+                            for (int pi = 0; pi < poly.pathCount; pi++)
+                                foreach (var v in poly.GetPath(pi)) pts.Add(c.transform.TransformPoint(v));
+                        }
+                        else if (box != null)
+                        {
+                            var sz = box.size * 0.5f; var o = box.offset;
+                            pts.Add(c.transform.TransformPoint(new Vector2(o.x - sz.x, o.y - sz.y)));
+                            pts.Add(c.transform.TransformPoint(new Vector2(o.x + sz.x, o.y - sz.y)));
+                            pts.Add(c.transform.TransformPoint(new Vector2(o.x + sz.x, o.y + sz.y)));
+                            pts.Add(c.transform.TransformPoint(new Vector2(o.x - sz.x, o.y + sz.y)));
+                        }
+                        else if (cir != null)
+                        {
+                            for (int k = 0; k < 12; k++)
+                            {
+                                float a = k * Mathf.PI * 2f / 12f;
+                                pts.Add(c.transform.TransformPoint(
+                                    cir.offset + new Vector2(Mathf.Cos(a), Mathf.Sin(a)) * cir.radius));
+                            }
+                        }
+                        else
+                        {
+                            var b = c.bounds;
+                            pts.Add(new Vector2(b.min.x, b.min.y)); pts.Add(new Vector2(b.max.x, b.min.y));
+                            pts.Add(new Vector2(b.max.x, b.max.y)); pts.Add(new Vector2(b.min.x, b.max.y));
+                        }
+                        if (pts.Count < 3) continue;
+                        n++;
+                        var line = new System.Text.StringBuilder();
+                        line.Append(c.gameObject.layer).Append(' ').Append(pts.Count);
+                        foreach (var v in pts) line.Append(' ').Append(v.x.ToString("F2")).Append(' ').Append(v.y.ToString("F2"));
+                        sb.AppendLine(line.ToString());
+                    }
+                    catch { }
+                }
+                sb.AppendLine("[POLY] END");
+                Plugin.L.LogWarning(sb.ToString());
+                Plugin.L.LogWarning($"[POLY] ✅ 形状已导出：{n} 个（多边形/矩形/圆形都已转成顶点）");
+            }
+            catch (Exception e) { Plugin.L.LogError($"[POLY] 导出失败: {e.Message}"); }
+        }
+
         internal static void TickIdAndGrid()
         {
             TickGameId();
@@ -174,6 +253,7 @@ namespace ProtoDump
                     sb.AppendLine(new string(row));
                 }
                 sb.AppendLine("[GRID] END");
+                DumpPolygons();          // ★ 同时导出真实形状
                 Plugin.L.LogWarning(sb.ToString());
                 _gridDumpedFor = phase;
                 Plugin.L.LogWarning($"[GRID] 阶段 = {phase}");

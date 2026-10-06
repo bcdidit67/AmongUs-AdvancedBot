@@ -114,6 +114,7 @@ namespace BotClient
                     g2 = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                                       ".local/share/Steam/steamapps/common/Among Us");
                 string lp = Path.Combine(g2, "BepInEx/LogOutput.log");
+                TryLoadPolys(lp);
                 if (!TryLoadGeometry(lp))
                     Console.WriteLine("      ⚠️ 未解析到碰撞几何 —— 寻路会原地不动（等场景变化后会重试）");
             }
@@ -856,6 +857,9 @@ namespace BotClient
         /// </summary>
         private static bool Walkable(float x, float y)
         {
+            // ★ 有真实形状就用真实形状（插件已导出 [POLY]）
+            lock (_polys) { if (_polys.Count > 0) return WalkablePoly(x, y); }
+
             const float R = 0.35f;
             bool inArea = false, onGround = false, hasArea = false;
             lock (_boxes)
@@ -981,6 +985,7 @@ namespace BotClient
                         if (string.IsNullOrEmpty(gd))
                             gd = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                                               ".local/share/Steam/steamapps/common/Among Us");
+                        TryLoadPolys(Path.Combine(gd, "BepInEx/LogOutput.log"));
                         TryLoadGeometry(Path.Combine(gd, "BepInEx/LogOutput.log"));
                     }
 
@@ -1699,6 +1704,110 @@ namespace BotClient
             }
             catch { }
             return -1;
+        }
+
+
+        // ═══════════════════════════════════════════════════════════
+        // ★★★ 真实多边形可走判定 ★★★
+        //
+        // 插件导出的 [POLY] 段给出每个碰撞体的**真实顶点**（不再用包围盒）：
+        //     [POLY] BEGIN <总数>
+        //     <层> <点数> x1 y1 x2 y2 ...
+        //     [POLY] END
+        //
+        // 对照用户的示意图：
+        //     绿色（正常人可走） = layer 2 的 AreaCollider 轮廓（不规则）
+        //     红色（有墙、内部可走）= layer 9 的 Ground 之外 / layer 12 的家具
+        //     紫色（谁都过不去）   = 最外层，无所谓，绿色区离它很远
+        //
+        // 判据：在任一 layer2 多边形内 **且** 在任一 layer9 多边形内 **且** 不在任何 layer12 内
+        // ═══════════════════════════════════════════════════════════
+        private class Poly { public int Layer; public float[] X, Y; }
+
+        private static readonly System.Collections.Generic.List<Poly> _polys
+            = new System.Collections.Generic.List<Poly>();
+        private static int _polyBeginLine = -1;
+
+        private static bool TryLoadPolys(string logPath)
+        {
+            try
+            {
+                if (!File.Exists(logPath)) return false;
+                var lines = File.ReadAllLines(logPath);
+                int begin = -1;
+                for (int i = lines.Length - 1; i >= 0; i--)
+                    if (lines[i].Contains("[POLY] BEGIN")) { begin = i; break; }
+                if (begin < 0) return false;
+                if (begin == _polyBeginLine) return false;      // 没换段就不重复解析
+
+                var tmp = new System.Collections.Generic.List<Poly>();
+                for (int i = begin + 1; i < lines.Length; i++)
+                {
+                    var L = lines[i];
+                    if (L.Contains("[POLY] END")) break;
+                    var f = L.Split(' ');
+                    if (f.Length < 4) continue;
+                    if (!int.TryParse(f[0], out int layer)) continue;
+                    if (!int.TryParse(f[1], out int n)) continue;
+                    if (f.Length < 2 + n * 2) continue;
+                    if (layer != 2 && layer != 9 && layer != 12) continue;   // 只关心这三层
+                    var poly = new Poly { Layer = layer, X = new float[n], Y = new float[n] };
+                    for (int k = 0; k < n; k++)
+                    {
+                        float.TryParse(f[2 + k * 2], System.Globalization.NumberStyles.Float,
+                                       System.Globalization.CultureInfo.InvariantCulture, out poly.X[k]);
+                        float.TryParse(f[3 + k * 2], System.Globalization.NumberStyles.Float,
+                                       System.Globalization.CultureInfo.InvariantCulture, out poly.Y[k]);
+                    }
+                    tmp.Add(poly);
+                }
+                if (tmp.Count == 0) return false;
+                lock (_polys) { _polys.Clear(); _polys.AddRange(tmp); }
+                _polyBeginLine = begin;
+                int c2 = tmp.FindAll(q => q.Layer == 2).Count;
+                int c9 = tmp.FindAll(q => q.Layer == 9).Count;
+                int c12 = tmp.FindAll(q => q.Layer == 12).Count;
+                Console.WriteLine($"      ★★★ 形状已载入：区域 {c2} 个、地板 {c9} 个、障碍 {c12} 个");
+                return true;
+            }
+            catch (Exception e) { Console.WriteLine($"      [形状] 解析失败: {e.Message}"); return false; }
+        }
+
+        /// <summary>射线法：点是否在多边形内</summary>
+        private static bool InPoly(Poly p, float x, float y)
+        {
+            bool inside = false;
+            int n = p.X.Length;
+            for (int i = 0, j = n - 1; i < n; j = i++)
+            {
+                if (((p.Y[i] > y) != (p.Y[j] > y)) &&
+                    (x < (p.X[j] - p.X[i]) * (y - p.Y[i]) / (p.Y[j] - p.Y[i]) + p.X[i]))
+                    inside = !inside;
+            }
+            return inside;
+        }
+
+        /// <summary>
+        /// 可走：在任一 layer2 区域内 且 在任一 layer9 地板上 且 不在任何 layer12 障碍内。
+        /// 三层都用**真实顶点**判定，不再用包围盒（包围盒会把不规则房间补成直角，
+        /// 补出来的部分正好是红区 —— 表现为「穿墙后在墙内活动」）。
+        /// </summary>
+        private static bool WalkablePoly(float x, float y)
+        {
+            bool inArea = false, onGround = false, hasArea = false, hasGround = false;
+            lock (_polys)
+            {
+                if (_polys.Count == 0) return true;      // 还没载入 → 不做限制
+                foreach (var p in _polys)
+                {
+                    if (p.Layer == 2) { hasArea = true; if (!inArea && InPoly(p, x, y)) inArea = true; }
+                    else if (p.Layer == 9) { hasGround = true; if (!onGround && InPoly(p, x, y)) onGround = true; }
+                    else if (p.Layer == 12 && InPoly(p, x, y)) return false;   // 撞到家具
+                }
+                if (hasArea && hasGround) return inArea && onGround;
+                if (hasArea) return inArea;
+                return onGround;
+            }
         }
 
         /// <summary>静默发送（不打印日志）—— 位置包频率高，全打会刷屏</summary>

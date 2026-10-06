@@ -163,15 +163,13 @@ namespace ProtoDump
             }
         }
 
-        [HarmonyPatch(typeof(NetworkedPlayerInfo), nameof(NetworkedPlayerInfo.PlayerName), MethodType.Setter)]
-        internal static class Patch_PlayerNameSetter
-        {
-            [HarmonyPrefix]
-            private static void Prefix(string value)
-            {
-                try { Plugin.L.LogWarning($"[GDP] ★ PlayerName setter ← '{value}'"); } catch { }
-            }
-        }
+        // ⚠️ 这里原来挂了一个 NetworkedPlayerInfo.PlayerName 的 setter 观测，
+        //    用途是排查「名字为什么设不上」—— 那个问题早已解决。
+        //    但它是个**极高频**的钩子（游戏每帧都会设这个名字），
+        //    实测把日志刷到了 8000+ 行同一句，后果有二：
+        //      ① 自检读到的 GameState 是 8000 行之前的旧值 → 误判「不在大厅」
+        //      ② 每秒几千行日志写入，本身就在拖慢游戏
+        //    已永久移除。需要时再临时加，用完就摘。
 
 
         // ═══════════════════════════════════════════════════════════

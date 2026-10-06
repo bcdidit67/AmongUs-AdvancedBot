@@ -33,7 +33,7 @@ ss -ulpn 2>/dev/null | grep -q ':22023' || { echo "  ❌ 不在房间里"; exit 
 #    日志里会留下一条过期记录（实测：画面 1/15，日志却说 4 条）。
 #    所以允许 FORCE=1 绕过。
 if [ "${FORCE:-0}" != "1" ]; then
-    CNT=$(grep -a '玩家表' "$LOG" 2>/dev/null | tail -1 | grep -oP '玩家表\(\K[0-9]+')
+    CNT=$(tail -400 "$LOG" 2>/dev/null | grep -a '玩家表' | tail -1 | grep -oP '玩家表\(\K[0-9]+')
     if [ "${CNT:-1}" != "1" ]; then
         echo "  ⛔ 玩家表日志显示 $CNT 条 —— 可能是过期记录（对局结束后输出会停）。"
         echo "     若画面上确实是 1/15，请加 FORCE=1 重跑："

@@ -215,7 +215,26 @@ namespace BotClient
                 }
 
                 // ── 保活应答 ──
-                if (so == 0x0c && d.Length >= 3)          // Ping → 回 Ack
+                // ★★★ 0x0B = Fragment（可靠分片）—— 必须 ACK！★★★
+                //
+                // Hazel 把超过 MTU 的可靠消息切成多个分片，每个分片都是 Reliable 语义，
+                // **必须逐个 ACK**。我们之前只 ACK 0x01(Reliable) 和 0x0c(Ping)，
+                // 把 0x0b 漏了 —— 于是房主发来的大消息（新人加入时的 SendInitialData
+                // 要把房主当前所有对象序列化一遍）永远收不到确认，
+                // 重发 9 次 / 7.5 秒后房主断开。
+                //
+                // 实测症状完全吻合：
+                //   · 每多一个人 SendInitialData 就更大 → 分片更多
+                //   · 「前 5 台顺利，第 6 台起 IncorrectGame 级联失败」
+                //   · 用户截图里的 "Reliable packet N was not ack'd after 7506ms (9 resends)"
+                //
+                // 分片格式与 Reliable 相同： [0x0b][id BE16][数据...]
+                if (so == 0x0b && d.Length >= 3)          // Fragment（可靠分片）→ 回 Ack
+                {
+                    ushort fn = (ushort)((d[1] << 8) | d[2]);
+                    SendPos(BuildAck(fn));                // 静默 ACK（分片量可能很大）
+                }
+                else if (so == 0x0c && d.Length >= 3)     // Ping → 回 Ack
                 {
                     ushort n = (ushort)((d[1] << 8) | d[2]);
                     SendRaw($"  ↳ Ack(ping {n})", BuildAck(n));

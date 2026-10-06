@@ -1040,12 +1040,23 @@ namespace BotClient
         ///
         /// 另外坐标范围是 FloatRange(-40, 40)，不是公开文档写的 ±50。
         /// </summary>
-        private static byte[] BuildPosition(int gameId, int cntNetId, ushort seq, float x, float y, float vx, float vy)
+        private static byte[] BuildPosition(int gameId, int cntNetId, ushort seq, float x, float y, float vx = 0f, float vy = 0f)
         {
             var nid = PackUInt32((uint)cntNetId);
 
-            // netId + seq(2) + 位置(4) + 速度(4)
-            int subLen = nid.Length + 2 + 4 + 4;
+            // ═══════════════════════════════════════════════════════════
+            // ★ 已回滚到**实测可用**的格式（发 0x03 会让人全部消失 + 掉线）
+            //
+            // 可用格式：netId | seq(2) | 标志(1)=0x01 | 位置(4)
+            //   实测效果：人可见 ✓  15/15 ✓  移动正常 ✓  稳定不掉线 ✓
+            //   缺点：没有速度 → 接收方算不出走路动画（看起来像滑行）
+            //
+            // 试过但失败的：把标志改成 0x03 并补上速度(4)
+            //   → 人全部消失、房主连接中断 ✗
+            //   说明 v19 的这个字段不是「脏位掩码」，语义与旧源码不同。
+            //   在拿到 v19 的准确格式之前，先保留可用版本。
+            // ═══════════════════════════════════════════════════════════
+            int subLen = nid.Length + 2 + 1 + 4;
             int gdLen = 4 + 2 + 1 + subLen;
 
             using var ms = new System.IO.MemoryStream();
@@ -1060,8 +1071,8 @@ namespace BotClient
             ms.Write(nid, 0, nid.Length);
             ms.WriteByte((byte)(seq & 0xFF));
             ms.WriteByte((byte)(seq >> 8));
+            ms.WriteByte(0x01);                         // 标志：只含位置（实测可用）
             WriteVec(ms, x);  WriteVec(ms, y);          // 位置
-            WriteVec(ms, vx); WriteVec(ms, vy);         // ★ 速度（动画靠它）
             return ms.ToArray();
         }
 
@@ -1074,11 +1085,14 @@ namespace BotClient
 
         /// <summary>
         /// 坐标/速度 → uint16。
-        /// 范围取源码里的 FloatRange(-40, 40)，**不是**公开文档写的 ±50。
+        /// 范围 ±50（协议文档对 v19 是对的）。
+        /// ⚠️ 我们手上的反编译源码是旧版本，写的是 FloatRange(-40,40)，
+        ///    但实测按 ±50 编码时人是**显示正常**的，按 ±40 反而全部消失 ——
+        ///    所以 v19 用的是 ±50。
         /// </summary>
         private static int EncX(float v)
         {
-            float t = (v + 40f) / 80f;
+            float t = (v + 50f) / 100f;
             if (t < 0f) t = 0f;
             if (t > 1f) t = 1f;
             return (int)(t * 65535f);

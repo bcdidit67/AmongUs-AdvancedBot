@@ -115,11 +115,34 @@ Hello(42B) → JoinGame → ClientInfo → SceneChange(自己的clientId)
 **注意**：**这正是路线 A（假人）当年卡了 17 轮的同一条报错** —— 区别在于
 人机方案有真实连接可查、有真实客户端序列可对比，所以它是可收敛的。
 
-**已排除**：`SetActivePodType(0x15)`（补上后报错依旧；且房主的 `[PKT]` 显示它没收到）。
+**已定位**：房主手里的 `ClientData`（实测）始终是
 
-**下一步**：报错来源已定位到
-`AmongUsClient.WaitWithTimeout(Func<bool> success, string errorMessage, int durationSeconds)`
-—— hook 它即可看到房主在等哪个条件。
+```
+IsReady = False    InScene = False    Character = null
+```
+
+「Timeout while waiting for other player data」就是在等这些字段就绪。
+
+**已逐一排除**（全部按真实客户端序列补发，报错依旧）：
+
+| # | 补的东西 | 结果 |
+|---|---|---|
+| 1 | `SetActivePodType(0x15)` | ✗ |
+| 2 | Hello 的 4 字节（真实在线是随机值，本地是 0） | ✗ |
+| 3 | `Ready(0x07)` | ✗ |
+| 4 | 装扮 RPC 批次（`RpcCalls` 0x26~0x2B） | ✗ |
+| 5 | 自建 Spawn（用房主分配的**真实** netId） | ✗ |
+
+> ⚠️ **结论（有价值的否定结果）**：
+> **客户端现在发送了真实加入序列里的每一个包，房主仍然超时。**
+> **所以缺的不是某个消息** —— 而是更底层的东西（会话状态、
+> 或「本地服务端」与「在线服务端」在校验上的差异）。
+> **这排除了「继续补包」这个方向**，后来人不必重走。
+
+**已知的次要现象**：房主不会自动回收幽灵玩家条目 ——
+失败测试会在玩家表里留下 `Character = null` 的空条目，
+累积后房主状态机崩溃、把房主自己踢出游戏。
+→ 已提供 [`BotClient/test-bot.sh`](BotClient/test-bot.sh) 做测试前自检（脏了拒测）。
 
 **两个已解决的关键 bug**（都记在对应 commit 里）：
 

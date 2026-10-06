@@ -346,11 +346,27 @@ namespace BotClient
                         //
                         // 正确做法：等房主把「分配给你的角色」的 Spawn 发过来，
                         // 读出里面的 netId，再对它发 CheckName/CheckColor。
-                        Console.WriteLine("      → 不自建角色（与真实客户端一致），等待房主分配 netId");
+                        // ★ 自建角色 —— 回来验证一个从没测过的假设：
+                        //   房主手里的 ClientData.Character 一直是 null，
+                        //   而这个字段很可能正是「房主接受客户端的 Spawn 后才填」的。
+                        //   昨天为了「对齐真实客户端」把它删了，之后就再没看过该字段，
+                        //   所以「自建 Spawn 能否让 Character 被填上」其实从未验证过。
+                        //
+                        //   netId 用从房主 Spawn 里解出来的真实值（而不是乱猜的 8），
+                        //   这样不会和房主已有的对象冲突。
+                        if (_ourNetId >= 0)
+                        {
+                            SendRaw($"PlayerSpawn(netBase={_ourNetId})",
+                                    BuildPlayerSpawn(gid, cid, pid, _ourNetId));
+                        }
 
                         int tgt = _rpcTarget >= 0 ? _rpcTarget : _netBase;
                         SendRaw($"CheckName/CheckColor(netId={tgt})",
                                 BuildCheckNameColor(gid, tgt, pid, "BotTest", _color));
+                        Thread.Sleep(150);
+                        SendRaw("装扮 RPC 批次", BuildCosmetics(gid, tgt));
+                        Thread.Sleep(150);
+                        SendRaw("Ready(0x07)", BuildReady(gid, cid));
                     }
                 }
                 pos += len;
@@ -599,8 +615,18 @@ namespace BotClient
             ms.WriteByte((byte)nm.Length);
             ms.Write(nm, 0, nm.Length);
 
-            // ── 以下为 v19 新增字段（照抄实测结构）──
-            ms.Write(new byte[] { 0x00, 0x00, 0x00, 0x00 }, 0, 4);
+            // ── 以下为 v19 新增字段 ──
+            //
+            // ★ 这 4 个字节：真实在线客户端填的是随机值（抓包实测 52 F8 41 3D），
+            //   而本地抓包恰好是 00 00 00 00 —— 我们照抄了本地那份，于是一直填 0。
+            //
+            //   怀疑它与「Timeout while waiting for other player data」有关：
+            //   房主手里我们的 ClientData 里 ProductUserId / FriendCode 都是空的，
+            //   「等玩家数据」很可能就是在等这类账号标识。
+            //   先按真实形态填随机值试一次。
+            var rnd4 = new byte[4];
+            new System.Random().NextBytes(rnd4);
+            ms.Write(rnd4, 0, 4);
             ms.Write(new byte[] { 0x0D, 0x00, 0x00, 0x00 }, 0, 4);
             ms.WriteByte(0x01);
             ms.Write(new byte[] { 0x09, 0x00, 0x02 }, 0, 3);
@@ -830,6 +856,88 @@ namespace BotClient
             ms.WriteByte(0x15);                        // tag = SetActivePodType
             ms.WriteByte((byte)nm.Length);
             ms.Write(nm, 0, nm.Length);
+            return ms.ToArray();
+        }
+
+        /// <summary>
+        /// ★★★ Ready (0x07) —— 协议里字面意思就是「客户端已同步、准备好」。
+        ///
+        /// 房主手里的 ClientData 实测：
+        ///   IsReady = False   ← 我们从来没发过这个包
+        ///   InScene = False
+        ///   Character = null  ← 所以角色一直没生成
+        /// 而服务端最终以 'Timeout while waiting for other player data' 断开。
+        ///
+        /// 格式（协议文档 0x07 Ready, Client-to-Host）：
+        ///   packed int32  Ready Client ID
+        ///   包在 GameData (0x05) 里
+        /// </summary>
+        private static byte[] BuildReady(int gameId, int clientId)
+        {
+            var cid = PackUInt32((uint)clientId);
+            int subLen = cid.Length;
+            int gdLen = 4 + 2 + 1 + subLen;
+
+            using var ms = new System.IO.MemoryStream();
+            ms.WriteByte(0x01);                        // Reliable
+            var n = NextNonce();
+            ms.WriteByte((byte)(n >> 8));
+            ms.WriteByte((byte)(n & 0xFF));
+            ms.WriteByte((byte)(gdLen & 0xFF));
+            ms.WriteByte((byte)((gdLen >> 8) & 0xFF));
+            ms.WriteByte(0x05);                        // GameData
+            var g = BitConverter.GetBytes(gameId); ms.Write(g, 0, 4);
+            ms.WriteByte((byte)(subLen & 0xFF));
+            ms.WriteByte((byte)((subLen >> 8) & 0xFF));
+            ms.WriteByte(0x07);                        // tag = Ready
+            ms.Write(cid, 0, cid.Length);              // 就绪的 clientId
+            return ms.ToArray();
+        }
+
+        /// <summary>
+        /// ★ 装扮 RPC 批次 —— 真实客户端在 CheckName/CheckColor 之后紧接着发这一组。
+        ///
+        /// 抓包实测（在线加入序列 #77）：
+        ///   04 00 02 0A 29 00 01     netId=0A  RpcCalls=0x29(41)
+        ///   04 00 02 0A 27 00 01     RpcCalls=0x27(39)
+        ///   04 00 02 0A 28 00 01     RpcCalls=0x28(40)
+        ///   04 00 02 0A 2A 00 01     RpcCalls=0x2A(42)
+        ///   04 00 02 0A 2B 00 01     RpcCalls=0x2B(43)
+        ///   04 00 02 0A 26 ...       RpcCalls=0x26(38)
+        ///
+        /// 这些是帽子/皮肤/宠物/名牌等外观槽位（值 00 01 = 无装扮）。
+        /// 房主手里的 ClientData 里我们的 Character 一直是 null，
+        /// 而「等玩家数据」很可能就包含这类外观数据 —— 所以这一组一直没发是可疑的。
+        /// </summary>
+        private static byte[] BuildCosmetics(int gameId, int netId)
+        {
+            int[] calls = { 0x26, 0x27, 0x28, 0x29, 0x2A, 0x2B };
+            var nid = PackUInt32((uint)netId);
+
+            int subs = 0;
+            foreach (var _ in calls) subs += 2 + 1 + (nid.Length + 1 + 2);
+
+            using var ms = new System.IO.MemoryStream();
+            ms.WriteByte(0x01);
+            var n = NextNonce();
+            ms.WriteByte((byte)(n >> 8));
+            ms.WriteByte((byte)(n & 0xFF));
+            int gdLen = 4 + subs;
+            ms.WriteByte((byte)(gdLen & 0xFF));
+            ms.WriteByte((byte)((gdLen >> 8) & 0xFF));
+            ms.WriteByte(0x05);
+            var g = BitConverter.GetBytes(gameId); ms.Write(g, 0, 4);
+
+            foreach (var call in calls)
+            {
+                int sl = nid.Length + 1 + 2;            // netId + RpcCalls + 值(2B)
+                ms.WriteByte((byte)(sl & 0xFF));
+                ms.WriteByte((byte)((sl >> 8) & 0xFF));
+                ms.WriteByte(0x02);                     // tag = RPC
+                ms.Write(nid, 0, nid.Length);
+                ms.WriteByte((byte)call);
+                ms.WriteByte(0x00); ms.WriteByte(0x01);
+            }
             return ms.ToArray();
         }
 

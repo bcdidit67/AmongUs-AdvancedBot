@@ -226,6 +226,41 @@ namespace ProtoDump
             catch (Exception e) { Plugin.L.LogWarning($"[GDP] InvalidNetId 读取失败: {e.Message}"); }
         }
 
+
+        // ═══════════════════════════════════════════════════════════
+        // ★★ 房主在等什么 —— 定位「Timeout while waiting for other player data」
+        //
+        // InnerNetClient.WaitWithTimeout(Func<bool> success, string errorMessage, int durationSeconds)
+        //
+        // 这是一个「等条件成立、超时就以 errorMessage 报错」的协程。
+        // 我们观测到的踢人理由正是它传的字符串之一 ——
+        // 所以只要看到**哪个 errorMessage 被启动过**，就知道房主卡在哪个条件上。
+        //
+        // success 是个 Func，读不到内容，但 errorMessage 足以定位。
+        // ═══════════════════════════════════════════════════════════
+        [HarmonyPatch(typeof(InnerNetClient), nameof(InnerNetClient.WaitWithTimeout))]
+        internal static class Patch_WaitWithTimeout
+        {
+            [HarmonyPrefix]
+            private static void Prefix(Il2CppSystem.Func<bool> success, string errorMessage, int durationSeconds)
+            {
+                try
+                {
+                    Plugin.L.LogWarning(
+                        $"[WAIT] ★ 房主开始等待: '{errorMessage}'  限时 {durationSeconds} 秒");
+                }
+                catch (Exception e) { Plugin.L.LogError($"[WAIT] hook 失败: {e.Message}"); }
+            }
+        }
+
+        [HarmonyPatch(typeof(InnerNetClient), nameof(InnerNetClient.WaitForConnectionOrFail))]
+        internal static class Patch_WaitForConnectionOrFail
+        {
+            [HarmonyPrefix]
+            private static void Prefix() =>
+                Plugin.L.LogWarning("[WAIT] ★★ WaitForConnectionOrFail 被调用");
+        }
+
         /// <summary>定期汇报玩家表规模 —— 看机器人有没有被算进去</summary>
         private static float _t;
         internal static void Tick(float dt)

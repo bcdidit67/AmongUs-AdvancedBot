@@ -70,6 +70,46 @@ namespace ProtoDump
             0xcd => "ClientInfo", _ => "?"
         };
 
+
+        // ═══════════════════════════════════════════════════════════
+        // ★★★ 房主到底在等什么 ★★★
+        //
+        // 实测房主手里的 ClientData：
+        //   IsReady = False    ← 等这个
+        //   InScene = False    ← 和这个
+        //   Character = null   ← 所以角色一直没生成
+        //
+        // 「Timeout while waiting for other player data」就是在等这两个标志位。
+        // hook 它们的 setter 就能看到：谁在设、什么时候设、设成什么 ——
+        // 从而确定我们该补哪个包。
+        //
+        // ⚠️ il2cpp 的属性 setter 参数常常没有名字（Harmony 按名绑定会失败），
+        //    所以只用 __instance 的 Postfix。
+        // ═══════════════════════════════════════════════════════════
+        [HarmonyPatch(typeof(ClientData), nameof(ClientData.InScene), MethodType.Setter)]
+        internal static class Patch_InScene
+        {
+            [HarmonyPostfix]
+            private static void Postfix(ClientData __instance) =>
+                Plugin.L.LogWarning($"[CD] ★ InScene 被设置 → {__instance?.InScene} (client id={__instance?.Id})");
+        }
+
+        [HarmonyPatch(typeof(ClientData), nameof(ClientData.IsReady), MethodType.Setter)]
+        internal static class Patch_IsReady
+        {
+            [HarmonyPostfix]
+            private static void Postfix(ClientData __instance) =>
+                Plugin.L.LogWarning($"[CD] ★ IsReady 被设置 → {__instance?.IsReady} (client id={__instance?.Id})");
+        }
+
+        [HarmonyPatch(typeof(ClientData), nameof(ClientData.Character), MethodType.Setter)]
+        internal static class Patch_Character
+        {
+            [HarmonyPostfix]
+            private static void Postfix(ClientData __instance) =>
+                Plugin.L.LogWarning($"[CD] ★ Character 被设置 → {( __instance?.Character == null ? "null" : $"pid={__instance.Character.PlayerId}")} (client id={__instance?.Id})");
+        }
+
         [HarmonyPatch(typeof(InnerNetClient), nameof(InnerNetClient.HandleMessage))]
         internal static class Patch_HandleMessage
         {
@@ -141,6 +181,35 @@ namespace ProtoDump
                     Plugin.L.LogWarning(
                         $"[PKT] ★ OnPlayerJoined: id={data?.Id} name='{data?.PlayerName}' " +
                         $"(本机 ClientId={c?.ClientId} HostId={c?.HostId})");
+
+                    // ★★★ 把整个 ClientData 摊开
+                    //   「Timeout while waiting for other player data」的字面意思就是
+                    //   「等这个玩家的数据就绪」—— 那缺的一定是某个字段。
+                    //   （路线 A 当年也填过这些字段但无效，因为那是伪造的 ClientData；
+                    //     这里的 ClientData 是房主依据我们真实的 Hello/JoinGame 建出来的，
+                    //     所以能看到**真实缺口**。）
+                    if (data != null)
+                    {
+                        var sb2 = new System.Text.StringBuilder();
+                        sb2.AppendLine("[CD] ★★★ ClientData 全字段:");
+                        sb2.AppendLine($"      Id             = {data.Id}");
+                        sb2.AppendLine($"      PlayerName     = '{data.PlayerName}'");
+                        sb2.AppendLine($"      IsReady        = {data.IsReady}");
+                        sb2.AppendLine($"      InScene        = {data.InScene}");
+                        sb2.AppendLine($"      IsBeingCreated = {data.IsBeingCreated}");
+                        sb2.AppendLine($"      HasBeenReported= {data.HasBeenReported}");
+                        sb2.AppendLine($"      PlayerLevel    = {data.PlayerLevel}");
+                        sb2.AppendLine($"      ColorId        = {data.ColorId}");
+                        try { sb2.AppendLine($"      Character      = {(data.Character == null ? "null ← ★缺" : $"pid={data.Character.PlayerId} owner={data.Character.OwnerId}")}"); }
+                        catch { sb2.AppendLine("      Character      = <读取失败>"); }
+                        try { sb2.AppendLine($"      PlatformData   = {(data.PlatformData == null ? "null ← ★缺" : "有")}"); }
+                        catch { sb2.AppendLine("      PlatformData   = <读取失败>"); }
+                        try { sb2.AppendLine($"      ProductUserId  = '{(string.IsNullOrEmpty(data.ProductUserId) ? "空 ← ★缺" : data.ProductUserId)}'"); }
+                        catch { sb2.AppendLine("      ProductUserId  = <读取失败>"); }
+                        try { sb2.AppendLine($"      FriendCode     = '{(string.IsNullOrEmpty(data.FriendCode) ? "空 ← ★缺" : data.FriendCode)}'"); }
+                        catch { sb2.AppendLine("      FriendCode     = <读取失败>"); }
+                        Plugin.L.LogWarning(sb2.ToString());
+                    }
                 }
                 catch (Exception e) { Plugin.L.LogError($"[PKT] OnPlayerJoined 读取失败: {e.Message}"); }
             }

@@ -309,11 +309,33 @@ namespace BotClient
                     if (!_clientInfoSent)
                     {
                         _clientInfoSent = true;
-                        Thread.Sleep(200);
+
+                        // ═══════════════════════════════════════════════════════
+                        // ★★★ 时序就是答案 ★★★
+                        //
+                        // 来源：Impostor（第三方 Among Us 服务端实现）的源码
+                        //   Constants.cs:        SpawnTimeout = 2500   （毫秒）
+                        //   Game.Incoming.cs:192 sender.InitializeSpawnTimeout();   ← 玩家一加入就启动
+                        //   ClientPlayer.cs:44   DisableSpawnTimeout();             ← 唯一解除方式
+                        //   Game.Data.cs:84-90   if (!TryGetPlayer(control.OwnerId, out var player)) throw;
+                        //                        player.Character = control;
+                        //                        player.DisableSpawnTimeout();
+                        //
+                        // 机制：**玩家加入后服务端启动 2.5 秒倒计时，只有收到
+                        // 「该玩家的 InnerPlayerControl（SpawnType=4）被 Spawn」才解除；
+                        // 消息里的 OwnerId 还必须能对上这个玩家。超时就断开 —— 报错正是
+                        // 「Timeout while waiting for other player data」。**
+                        //
+                        // 我们之前的自建 Spawn 是**等房主先发 Spawn 给我们之后**才发的，
+                        // 那可能早就超过 2.5 秒了。所以改成：一拿到 JoinedGame
+                        // （此时已知自己的 clientId）就**立刻**把自己的角色 Spawn 出去。
+                        // ═══════════════════════════════════════════════════════
+
+                        // 1) 报到 + 场景切换（尽快，但不能再等房主）
                         SendRaw("ClientInfo(报到)", BuildClientInfo(gid, cid, 2));
-                        Thread.Sleep(200);
+                        Thread.Sleep(120);
                         SendRaw("SceneChange(OnlineGame)", BuildSceneChange(gid, cid, "OnlineGame"));
-                        Thread.Sleep(200);
+                        Thread.Sleep(120);
 
                         // ★★★ 只操作自己的对象 —— 顺序很重要：
                         //   1) 先 Spawn 自己的玩家（netId 从 _netBase 起）
@@ -346,27 +368,32 @@ namespace BotClient
                         //
                         // 正确做法：等房主把「分配给你的角色」的 Spawn 发过来，
                         // 读出里面的 netId，再对它发 CheckName/CheckColor。
-                        // ★ 自建角色 —— 回来验证一个从没测过的假设：
-                        //   房主手里的 ClientData.Character 一直是 null，
-                        //   而这个字段很可能正是「房主接受客户端的 Spawn 后才填」的。
-                        //   昨天为了「对齐真实客户端」把它删了，之后就再没看过该字段，
-                        //   所以「自建 Spawn 能否让 Character 被填上」其实从未验证过。
+                        // 2) ★★★ 绝不自建角色 ★★★
                         //
-                        //   netId 用从房主 Spawn 里解出来的真实值（而不是乱猜的 8），
-                        //   这样不会和房主已有的对象冲突。
-                        if (_ourNetId >= 0)
-                        {
-                            SendRaw($"PlayerSpawn(netBase={_ourNetId})",
-                                    BuildPlayerSpawn(gid, cid, pid, _ourNetId));
-                        }
-
-                        int tgt = _rpcTarget >= 0 ? _rpcTarget : _netBase;
-                        SendRaw($"CheckName/CheckColor(netId={tgt})",
-                                BuildCheckNameColor(gid, tgt, pid, "BotTest", _color));
-                        Thread.Sleep(150);
-                        SendRaw("装扮 RPC 批次", BuildCosmetics(gid, tgt));
-                        Thread.Sleep(150);
-                        SendRaw("Ready(0x07)", BuildReady(gid, cid));
+                        // 源码证据（InnerNetClient.Spawn）：
+                        //     public void Spawn(InnerNetObject netObjParent, int ownerId, SpawnFlags flags)
+                        //     {
+                        //         if (this.AmHost) { ...正常... return; }
+                        //         if (!this.AmClient) return;
+                        //         Debug.LogError("Tried to spawn while not host:" + netObjParent);
+                        //     }
+                        //   → **只有主机能 Spawn，客户端发 Spawn 是无效操作。**
+                        //
+                        // 而且游戏日志里抓到了这一行：
+                        //     Double spawn character: 3 already has 9
+                        //   → 房主通过 CreatePlayer 早就给我们建好了角色（netId=9），
+                        //     我们又自己发一个 Spawn，于是被 double-spawn 保护丢弃。
+                        //
+                        // 更糟的是：我们之前写死 netId=_netBase(8)，
+                        // 而房主实际分配的是 9 —— 于是 CheckName 和位置包
+                        // 全部打在**不存在的对象**上（名字设不上、位置不动）。
+                        //
+                        // 正确做法：什么都不发，**等房主把它的 Spawn 发过来**，
+                        // 从里面解出真实的 netId，再用那个 netId 发 RPC。
+                        // 房主的链路是：我们的 SceneChange → InScene=true
+                        //              → SendInitialData(给我们发所有对象的 Spawn)
+                        //              → CreatePlayer(建房主的角色并把 Character 指过去)
+                        Console.WriteLine("      → 不自建角色（源码确认客户端无权 Spawn），等待房主分配 netId");
                     }
                 }
                 pos += len;
@@ -483,7 +510,14 @@ namespace BotClient
                     SendRaw($"CheckName/CheckColor(netId={_ourNetId})",
                             BuildCheckNameColor(_gameId, _ourNetId, _playerId, "BotTest", _color));
 
-                    // 起一个后台线程持续向右移动
+                    // ★ 名字设完之后，补上真实客户端序列里的其余部分（装扮 / Ready）
+                    //   全部打在**房主分配的** netId 上，而不是我们猜测的编号。
+                    Thread.Sleep(120);
+                    SendRaw("装扮 RPC 批次", BuildCosmetics(_gameId, _ourNetId));
+                    Thread.Sleep(120);
+                    SendRaw("Ready(0x07)", BuildReady(_gameId, _myClientId));
+
+                    // 起一个后台线程持续移动
                     if (!_moving)
                     {
                         _moving = true;

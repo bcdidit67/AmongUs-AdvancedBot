@@ -44,6 +44,8 @@ namespace BotClient
         private static string _userName = "BotTest";   // 名字（多个人机时各不相同）
         private static int _voteFor = -1;             // ★ 投票目标 playerId（-1=不投）
         private static bool _rejoining;               // 正在重返大厅
+        private static int _stuckTicks;               // 连续「无处可站」的次数
+        private static bool _resending;               // 正在重发 SceneChange
         private static int _dir = 1;   // 1=右, -1=左
         // 步长 0.20（5Hz × 0.20 = 1 单位/秒）—— 实测可用的配置，别乱动
         private const float Step = 0.20f;
@@ -995,6 +997,30 @@ namespace BotClient
                     //     表现出来就是「站在原地一动不动」（实测踩过）。
                     if (!Walkable(_posX, _posY))
                     {
+                        // ★★ 连续 10 次（约 2 秒）都无处可站 → 说明「我在这个世界里
+                        //    根本没有立足之地」：多半是换了场景而房主还没给我建角色
+                        //    （位置还是上一个场景的坐标，用新场景的几何判定自然全不可走）。
+                        //    此时重发 ClientInfo + SceneChange，让房主重建角色。
+                        if (++_stuckTicks >= 10 && !_resending)
+                        {
+                            _stuckTicks = 0;
+                            _resending = true;
+                            Console.WriteLine("      ★★★ 连续无处可站 —— 判断为换场景未重建角色，重发 ClientInfo + SceneChange");
+                            var tr = new Thread(() =>
+                            {
+                                try
+                                {
+                                    Thread.Sleep(300);
+                                    SendRaw("ClientInfo(自救)", BuildClientInfo(_gameId, _myClientId, 2));
+                                    Thread.Sleep(300);
+                                    SendRaw("SceneChange(自救)", BuildSceneChange(_gameId, _myClientId, "OnlineGame"));
+                                    Thread.Sleep(1500);
+                                }
+                                catch { }
+                                _resending = false;
+                            }) { IsBackground = true };
+                            tr.Start();
+                        }
                         float ex = 0f, ey = 0f; bool found = false;
                         for (int r = 1; r <= 12 && !found; r++)
                             for (int dj = -r; dj <= r && !found; dj++)
@@ -1016,6 +1042,8 @@ namespace BotClient
                         }
                         continue;
                     }
+
+                    _stuckTicks = 0;      // 能站住 → 清零
 
                     if (idx >= path.Count)
                     {

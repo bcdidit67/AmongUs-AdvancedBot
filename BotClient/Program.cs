@@ -672,7 +672,19 @@ namespace BotClient
         private static bool _haveRoom;
         private static float _roomMinX, _roomMinY, _roomMaxX, _roomMaxY;
 
-        /// <summary>从游戏日志里的 [COL] 段解析出 ShipRoom 的包围盒</summary>
+        /// <summary>
+        /// 从 [COL] 段解析出**内圈地板**的包围盒。
+        ///
+        /// ★ 踩过的坑：一开始取的是面积最大的 ShipRoom（35.3），
+        ///   但那是**墙圈的外沿**，它的包围盒把墙体本身也包进去了 ——
+        ///   于是机器人可以在「墙的厚度里面」活动，看起来就是穿墙。
+        ///
+        ///   实测两个内/外圈：
+        ///     35.3  L9  x[-3.45, 3.46] y[-1.63, 3.46]  ShipRoom      ← 外沿（含墙）
+        ///     21.0  L9  x[-2.73, 2.81] y[-0.79, 3.00]  Lobby(Clone)  ← 地板（真正可走）
+        ///
+        ///   规则：在 Ship 层里取**面积 > 15 但最小的那个** = 内圈地板。
+        /// </summary>
         private static bool TryLoadRoom(string logPath)
         {
             try
@@ -683,24 +695,32 @@ namespace BotClient
                     if (lines[i].Contains("[COL] BEGIN")) { begin = i; break; }
                 if (begin < 0) return false;
 
-                float best = 0f;
+                float best = float.MaxValue;   // ★ 取「够大但最小」的那个 = 内圈
+                bool found = false;
                 for (int i = begin + 1; i < lines.Length; i++)
                 {
                     var L = lines[i];
                     if (L.Contains("[COL] END")) break;
                     var f = L.Split(' ');
                     if (f.Length < 7) continue;
-                    if (!L.Contains("ShipRoom")) continue;         // ★ 只认 ShipRoom
+                    if (L.Contains("Player") || L.Contains("Deadzone")) continue;
+                    if (!int.TryParse(f[0], out int layer) || layer != 9) continue;
                     if (!float.TryParse(f[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var x0)) continue;
                     float.TryParse(f[2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var y0);
                     float.TryParse(f[3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var x1);
                     float.TryParse(f[4], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var y1);
                     float area = (x1 - x0) * (y1 - y0);
-                    if (area > best) { best = area; _roomMinX = x0; _roomMinY = y0; _roomMaxX = x1; _roomMaxY = y1; }
+                    if (area < 15f) continue;                     // 太小的不是房间
+                    if (area < best)                              // ★ 取最小的 = 内圈地板
+                    {
+                        best = area; found = true;
+                        _roomMinX = x0; _roomMinY = y0; _roomMaxX = x1; _roomMaxY = y1;
+                        Console.WriteLine($"      · 房间容器候选: {f[6]} 面积={area:F1} x[{x0:F2},{x1:F2}] y[{y0:F2},{y1:F2}]");
+                    }
                 }
-                if (best <= 0f) return false;
+                if (!found) return false;
                 _haveRoom = true;
-                Console.WriteLine($"      ★★★ 房间边界: x[{_roomMinX:F2},{_roomMaxX:F2}] y[{_roomMinY:F2},{_roomMaxY:F2}]");
+                Console.WriteLine($"      ★★★ 房间边界（内圈）: x[{_roomMinX:F2},{_roomMaxX:F2}] y[{_roomMinY:F2},{_roomMaxY:F2}] 面积={best:F1}");
                 return true;
             }
             catch (Exception e) { Console.WriteLine($"      [房间] 解析失败: {e.Message}"); return false; }

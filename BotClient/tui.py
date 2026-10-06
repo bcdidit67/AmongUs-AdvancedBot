@@ -33,8 +33,19 @@ import subprocess
 # ─────────────────────────────────────────────────────────────
 IS_WIN = sys.platform.startswith("win")
 HERE = os.path.dirname(os.path.abspath(__file__))
-BOT_DIR = os.path.join(HERE, "bot")
-BOT_DLL = os.path.join(BOT_DIR, "BotClient.dll")
+
+# BotClient.dll 的位置随「打包布局 / 源码布局」而不同，逐个找：
+#   · <包根>/bot/BotClient.dll                    （解压即用的包）
+#    · <源码>/bin/Release/net6.0/BotClient.dll    （开发目录）
+#    · 与本文件同级
+_CANDS = [
+    os.path.join(HERE, "bot", "BotClient.dll"),
+    os.path.join(HERE, "bin", "Release", "net6.0", "BotClient.dll"),
+    os.path.join(HERE, "bin", "Debug", "net6.0", "BotClient.dll"),
+    os.path.join(HERE, "BotClient.dll"),
+]
+BOT_DLL = next((p for p in _CANDS if os.path.isfile(p)), _CANDS[0])
+BOT_DIR = os.path.dirname(BOT_DLL)
 
 GAME_ID = 32
 VERSION = 50663600

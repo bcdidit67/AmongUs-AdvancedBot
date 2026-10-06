@@ -103,6 +103,9 @@ namespace BotClient
             SendRaw("Hello(发起)", BuildHello(NextNonce(), version, user));
             Thread.Sleep(300);
 
+            // 1.2 ★ 启动「拍桌」监听线程（外部建触发文件即可让它按紧急按钮）
+            new Thread(PressLoop) { IsBackground = true }.Start();
+
             // 1.5 ★ 载入可行走网格（由游戏内插件写进 BepInEx 日志）
             //     没有网格也能跑，只是会退回「穿墙」的旧行为。
             if (!TryLoadGrid())
@@ -933,6 +936,38 @@ namespace BotClient
                         SendPos(pkt);
                 }
                 catch (Exception e) { Console.WriteLine($"      [移动失败] {e.Message}"); return; }
+            }
+        }
+
+
+        // ═══════════════════════════════════════════════════════════
+        // ★★★ 拍桌（按紧急按钮）★★★
+        //
+        // 源码依据（EmergencyMinigame.cs:88）：
+        //     PlayerControl.LocalPlayer.CmdReportDeadBody(null);
+        // 而 CmdReportDeadBody 的实现是：
+        //     StartRpc(this.NetId, 11, Reliable);  Write(target != null ? target.PlayerId : byte.MaxValue);
+        //   → 紧急按钮 = 给自己的 PlayerControl 发 RPC(11)，载荷单字节 0xFF
+        //
+        // 触发方式：外部建一个文件 /tmp/press-<我的pid>.trigger
+        //          （这样测试时不用重启人机，随时能让它拍桌）
+        // ═══════════════════════════════════════════════════════════
+        private static void PressLoop()
+        {
+            string trig = $"/tmp/press-{Environment.ProcessId}.trigger";
+            while (true)
+            {
+                try
+                {
+                    Thread.Sleep(500);
+                    if (!File.Exists(trig)) continue;
+                    File.Delete(trig);
+                    if (_ourNetId < 0) { Console.WriteLine("      [拍桌] 还没有角色，跳过"); continue; }
+                    Console.WriteLine($"      ★★★ 拍桌！给自己的角色(netId={_ourNetId})发 ReportDeadBody(0xFF)");
+                    SendRaw("ReportDeadBody(紧急按钮)",
+                            BuildRpc(_gameId, _ourNetId, 11, new byte[] { 0xFF }));
+                }
+                catch (Exception e) { Console.WriteLine($"      [拍桌失败] {e.Message}"); }
             }
         }
 

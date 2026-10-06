@@ -68,3 +68,6 @@ sleep 8
 echo "  实例数: $(n=0; for d in /proc/[0-9]*; do pid=${d#/proc/}; [ "$pid" = "$$" ] && continue; [ -r "$d/cmdline" ] || continue; exe=$(tr '\0' '\n' < "$d/cmdline" 2>/dev/null | head -1); case "$exe" in */dotnet|dotnet) tr '\0' ' ' < "$d/cmdline" 2>/dev/null | grep -q 'BotClient.dll' && n=$((n+1));; esac; done; echo $n)"
 echo "  房主玩家表: $(grep -a '玩家表' "$LOG" | tail -1 | grep -oP '玩家表\(\K[0-9]+') 条"
 echo "  断连: $(grep -ac 'HandleDisconnect' "$LOG" 2>/dev/null) 次"
+echo
+echo "  拍桌（按紧急按钮）: ./press.sh <playerId>"
+echo "  投票目标: 启动时第三个参数，例: ./multi-bot.sh 3 1 <内鬼pid>"

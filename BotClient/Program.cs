@@ -1855,6 +1855,8 @@ namespace BotClient
         private static void SceneWatchLoop()
         {
             string last = "";
+            int dbg = 0;
+            Console.WriteLine("      [场景监听] 线程已启动");
             while (true)
             {
                 try
@@ -1867,20 +1869,32 @@ namespace BotClient
                     string lp = Path.Combine(gd, "BepInEx/LogOutput.log");
                     if (!File.Exists(lp)) continue;
 
-                    // 读最后一条 [GRID] 阶段
-                    string phase = "";
+                    // ★★★ 用「[POLY] 段的行号」判断换场景，**不要用阶段名** ★★★
+                    //
+                    // 踩过的坑：日志里最后一条 [GRID] 阶段往往是**上一局**留下的
+                    // （比如上局进过地图，值就是 SHIP），人机一启动就读到 SHIP，
+                    // 等它真的进地图时值还是 SHIP —— 检测不到变化，永远不会重发。
+                    // 而行号一定会随插件重导几何而变化，是可靠的判据。
                     var lines = File.ReadAllLines(lp);
+                    int polyLine = -1;
+                    for (int i = lines.Length - 1; i >= 0; i--)
+                        if (lines[i].Contains("[POLY] BEGIN")) { polyLine = i; break; }
+
+                    string phase = "";
                     for (int i = lines.Length - 1; i >= 0; i--)
                     {
                         var m = System.Text.RegularExpressions.Regex.Match(lines[i], @"\[GRID\] 阶段 = (\w+)");
                         if (m.Success) { phase = m.Groups[1].Value; break; }
                     }
-                    if (string.IsNullOrEmpty(phase) || phase == last) continue;
-                    if (last == "") { last = phase; continue; }      // 第一次只记录
-                    last = phase;
+                    if (dbg < 5) { dbg++; Console.WriteLine($"      [场景监听] polyLine={polyLine} 阶段='{phase}' last={last}"); }
+                    if (polyLine < 0) continue;
+                    string key = polyLine.ToString();
+                    if (key == last) continue;
+                    if (last == "") { last = key; continue; }        // 第一次只记录
+                    last = key;
 
                     if (_myClientId < 0 || _gameId <= 0) continue;
-                    Console.WriteLine($"      ★★★ 阶段变为 {phase} —— 重发 ClientInfo + SceneChange（让房主在新场景建角色）");
+                    Console.WriteLine($"      ★★★ 检测到换场景（阶段={phase}）—— 重发 ClientInfo + SceneChange，让房主在新场景建角色");
                     _ourNetId = -1; _cntNetId = -1;
                     Thread.Sleep(1500);
                     SendRaw("ClientInfo(换场景)", BuildClientInfo(_gameId, _myClientId, 2));

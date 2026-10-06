@@ -696,7 +696,7 @@ namespace BotClient
         //
         // 可走 = **在任一房间内** 且 **不在任何障碍内**
         // ═══════════════════════════════════════════════════════════
-        private class Box { public float x0, y0, x1, y1; public bool Room; }
+        private class Box { public float x0, y0, x1, y1; public bool Room; public int Layer; }
 
         private static readonly System.Collections.Generic.List<Box> _boxes
             = new System.Collections.Generic.List<Box>();
@@ -739,10 +739,39 @@ namespace BotClient
                     float area = (x1 - x0) * (y1 - y0);
                     if (area <= 0f) continue;
 
-                    var b = new Box { x0 = x0, y0 = y0, x1 = x1, y1 = y1, Room = false };
-                    if (layer == 9 && area > 15f) b.Room = true;                        // 房间
-                    else if (area < 5f && (layer == 9 || layer == 0)) b.Room = false;   // 障碍
-                    else continue;                                                       // 其它忽略
+                    // ★★★ 判据按**实测数据**写，不是照大厅类推 ★★★
+                    //
+                    // 大厅（SCENE LOBBY）：
+                    //   layer 9  Lobby(Clone) 21.0    ← 地板（真正可走）
+                    //   layer 9  ShipRoom     35.3    ← 包住地板的墙圈（靠嵌套剔除）
+                    //   layer 9/0 小箱子 area<5       ← 障碍
+                    //
+                    // 地图（SCENE SHIP，241 个碰撞体，实测层分布）：
+                    //   layer  2  21 个 AreaCollider 总面积 757  ← ★ 这才是「可行走区域」
+                    //   layer  9  44 个 Ground       总面积 680  ← 只是地板贴图，别当房间
+                    //   layer 10  37 个 Room                     ← 房间触发区
+                    //   layer 12  89 个 桌子/栏杆等               ← ★ 障碍
+                    //   layer  8  玩家                            ← 必须排除
+                    var b = new Box { x0 = x0, y0 = y0, x1 = x1, y1 = y1, Room = false, Layer = layer };
+
+                    // ★ 两个阶段用**完全不同**的规则 —— 实测层分布差异极大
+                    bool isShip = (scene == "SHIP");
+                    if (isShip)
+                    {
+                        // 地图：可走 = layer 2 的 AreaCollider（21 个，总面积 757）
+                        //       ★ 绝不能把 layer 9 的 Ground 当地板 —— 那只是贴图，
+                        //         它们散落在各处，放行后会走到墙外（实测 42 个"房间"时越界）
+                        if (layer == 2)                     b.Room = true;
+                        else if (layer == 12 && area < 20f) b.Room = false;   // 桌椅栏杆
+                        else continue;
+                    }
+                    else
+                    {
+                        // 大厅：可走 = layer 9 的大块（Lobby(Clone)），墙圈靠嵌套剔除
+                        if (layer == 9 && area > 15f)       b.Room = true;
+                        else if (area < 5f && (layer == 9 || layer == 0)) b.Room = false;
+                        else continue;
+                    }
 
                     tmp.Add(b);
                     if (x0 < mnx) mnx = x0; if (y0 < mny) mny = y0;
@@ -764,7 +793,12 @@ namespace BotClient
                 // 人机走到 x=3.10（超过地板的 2.81）—— 看起来就是穿墙。
                 //
                 // 规则：若某个房间框**完全包含**另一个房间框，那它是墙圈，剔除。
-                var roomList = tmp.FindAll(b => b.Room);
+                // ⚠️ 这个剔除规则只适用于**大厅**：
+                //    大厅里 Lobby(Clone)（地板）被 ShipRoom（墙圈）完全包住，都是 layer 9。
+                //    而地图的 AreaCollider(layer 2) 之间有重叠但都是**合法的可走区域** ——
+                //    对它们套用「包住别人就剔除」会误删大片区域（实测剔掉了三块）。
+                //    所以只在 layer 9 上做这件事。
+                var roomList = tmp.FindAll(b => b.Room && b.Layer == 9);
                 var inner = new System.Collections.Generic.List<Box>();
                 foreach (var a in roomList)
                 {
@@ -782,7 +816,7 @@ namespace BotClient
                 }
                 if (inner.Count > 0)
                 {
-                    tmp.RemoveAll(b => b.Room && !inner.Contains(b));
+                    tmp.RemoveAll(b => b.Room && b.Layer == 9 && !inner.Contains(b));
                 }
 
                 lock (_boxes)

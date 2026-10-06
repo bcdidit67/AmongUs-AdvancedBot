@@ -19,17 +19,25 @@ LOG="$GAME/BepInEx/LogOutput.log"
 DIR="$(cd "$(dirname "$0")" && pwd)"
 export DOTNET_ROOT="$HOME/.dotnet"; export PATH="$HOME/.dotnet:$PATH"; export DOTNET_CLI_TELEMETRY_OPTOUT=1
 
-NAMES=(BotA BotB BotC BotD BotE BotF)
+NAMES=(Bot01 Bot02 Bot03 Bot04 Bot05 Bot06 Bot07 Bot08 Bot09 Bot10 Bot11 Bot12 Bot13 Bot14)
 
 echo "════════ 多个人机启动 ════════"
 
 # ── 前置检查 ──
 pgrep -x "Among Us.exe" >/dev/null 2>&1 || { echo "  ❌ 游戏未运行"; exit 1; }
 ss -ulpn 2>/dev/null | grep -q ':22023' || { echo "  ❌ 不在房间里"; exit 2; }
-CNT=$(grep -a '玩家表' "$LOG" 2>/dev/null | tail -1 | grep -oP '玩家表\(\K[0-9]+')
-if [ "${CNT:-1}" != "1" ]; then
-    echo "  ⛔ 玩家表不干净（$CNT 条）—— 请重开一局再试"
-    exit 3
+# ⚠️ 这个判据只在**同一次游戏进程内**可靠：
+#    对局结束后 GameData.Instance 会被销毁，定期输出就停了，
+#    日志里会留下一条过期记录（实测：画面 1/15，日志却说 4 条）。
+#    所以允许 FORCE=1 绕过。
+if [ "${FORCE:-0}" != "1" ]; then
+    CNT=$(grep -a '玩家表' "$LOG" 2>/dev/null | tail -1 | grep -oP '玩家表\(\K[0-9]+')
+    if [ "${CNT:-1}" != "1" ]; then
+        echo "  ⛔ 玩家表日志显示 $CNT 条 —— 可能是过期记录（对局结束后输出会停）。"
+        echo "     若画面上确实是 1/15，请加 FORCE=1 重跑："
+        echo "       FORCE=1 ./multi-bot.sh $*"
+        exit 3
+    fi
 fi
 echo "  ✅ 前置检查通过"
 
@@ -56,7 +64,7 @@ for i in $(seq 0 $((N-1))); do
     nohup dotnet bin/Release/net6.0/BotClient.dll 32 50663600 "$NAME" 0 0 8 "$COLOR" "$PID_ARG" 0 "$VOTE" > "$LOGF" 2>&1 &
     echo "     PID $!  →  $LOGF"
     # 等这个人的角色真正被房主创建出来（收到 Spawn）再放下一个
-    for t in $(seq 1 20); do
+    for t in $(seq 1 12); do
         sleep 1
         grep -q '玩家 netId=' "$LOGF" 2>/dev/null && { echo "     ✅ 已就位（$t 秒）"; break; }
     done

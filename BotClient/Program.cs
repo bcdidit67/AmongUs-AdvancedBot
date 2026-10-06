@@ -45,7 +45,8 @@ namespace BotClient
         private static int _voteFor = -1;             // ★ 投票目标 playerId（-1=不投）
         private static bool _rejoining;               // 正在重返大厅
         private static int _dir = 1;   // 1=右, -1=左
-        private const float Step = 0.20f;   // 每帧位移
+        // 步长 0.20（5Hz × 0.20 = 1 单位/秒）—— 实测可用的配置，别乱动
+        private const float Step = 0.20f;
         private static float _dx = 1f, _dy;   // 当前游走方向
         private static int _dirFrames;        // 还有几帧换方向
         private static readonly Random _rng = new Random();
@@ -888,7 +889,19 @@ namespace BotClient
             {
                 try
                 {
-                    Thread.Sleep(200);                  // ★ 5Hz —— 原 10Hz 包量过大，会把房主冲垮
+                    // ⚠️ 已回滚到 5Hz —— 实测可用的配置。
+                    //
+                    // 试过的调参都没有变好，反而更糟：
+                    //   10Hz + 步长 0.10 → 更卡（用户反馈「更一卡一卡的」）
+                    //   10Hz + 步长 0.25 → 断连 12 次、就位 11/14 ✗
+                    //
+                    // 而这套 5Hz + 步长 0.20 是**确认可用**的：
+                    //   人可见 ✓  15/15 ✓  移动正常 ✓  不掉线 ✓
+                    //
+                    // 「走路动画偏顿挫」暂时作为已知限制保留 ——
+                    // 与其在没吃透协议的情况下反复试错、把局面弄乱，
+                    // 不如先保住可用状态，等有更可靠的依据再动。
+                    Thread.Sleep(200);
 
                     // ★ 来回走，**绝不瞬移**。
                     //   之前到 +40 就跳回 -40 —— 房主看到的是一次异常位移，

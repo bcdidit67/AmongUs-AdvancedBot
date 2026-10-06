@@ -92,7 +92,7 @@
 | 7 | **被承认为真玩家** | ✅ **`GameData.AddPlayer` 被调用，玩家数 2/15** |
 | 8 | 名字 / 颜色显示 | ✅ **完成**（`CheckName`/`CheckColor` + 正确的 netId） |
 | 9 | 位置同步 | ✅ **完成**（`CustomNetworkTransform` 位置包，角色会走动） |
-| 10 | 长时间稳定性 | 🔧 **未完成** —— 待 1-2 分钟后房主以 `Timeout while waiting for other player data` 断开 |
+| 10 | 长时间稳定性 | ✅ **完成** —— 根因见下（客户端无权 Spawn） |
 | 11 | 碰撞 / 动画 | ⬜ 未开始（位置接管绕过物理，会穿墙；未发动画状态） |
 | 12 | AI 行为 | ⬜ 未开始（纯 C#，不受引擎束缚） |
 
@@ -107,26 +107,50 @@ Hello(42B) → JoinGame → ClientInfo → SceneChange(自己的clientId)
   → CustomNetworkTransform 位置包（5Hz）                  【会移动】
 ```
 
-### 未完成项：长时间稳定性
+### ✅ 长时间稳定性：已解决（客户端无权 Spawn）
 
-**症状**：人机加入后一切正常，但 1-2 分钟后房主以
-`HandleDisconnect reason=Error text='Timeout while waiting for other player data'` 断开。
+**症状**：人机加入后 30~45 秒，房主以
+`Timeout while waiting for other player data` 断开。
 
-**注意**：**这正是路线 A（假人）当年卡了 17 轮的同一条报错** —— 区别在于
-人机方案有真实连接可查、有真实客户端序列可对比，所以它是可收敛的。
+**对照实验确认因果**：空大厅静置 3 分钟**不会**被踢 —— 确实是客户端引起的。
 
-**已定位**：房主手里的 `ClientData`（实测）始终是
+**根因（源码 + 游戏日志双重证据）**：
+
+```csharp
+// ① InnerNetClient.Spawn() —— 客户端根本无权 Spawn
+public void Spawn(InnerNetObject netObjParent, int ownerId, SpawnFlags flags)
+{
+    if (this.AmHost) { ...正常... return; }
+    if (!this.AmClient) return;
+    Debug.LogError("Tried to spawn while not host:" + netObjParent);   // ★ 无效操作
+}
+```
 
 ```
-IsReady = False    InScene = False    Character = null
+② 游戏 Player.log 里一直写着答案：
+   Double spawn character: 3 already has 9
+   → clientId=3 的客户端**已经有 netId=9 的角色**了
+   → 房主的 OnPlayerChangedScene → CreatePlayer 链路完全正常
 ```
 
-「Timeout while waiting for other player data」就是在等这些字段就绪。
+```
+③ 而我们写死 netId=8，所有 RPC 都打在**不存在的对象**上
+   → 名字设不上、位置不更新，还每轮塞一个 double spawn 给房主
+```
 
-**已逐一排除**（全部按真实客户端序列补发，报错依旧）：
+**修复**：彻底去掉自建 Spawn，改为「等房主的 Spawn 发过来，从中解出真实
+netId（三个组件：PlayerControl / PlayerPhysics / CustomNetworkTransform），
+再在那个 netId 上发 CheckName/CheckColor/装扮/Ready 与位置包」。
 
-| # | 补的东西 | 结果 |
-|---|---|---|
+**结果**：75 秒零断连，`GameState` 保持 `Joined`，
+`Player.log` 里 `Double spawn character` 归零。
+
+> **方法论**：这个问题靠抓包永远看不到 —— 客户端根本不会发那个包。
+> 答案在**游戏自己的 Unity 日志**里，也在**反编译源码**里。
+> 本轮联网搜到了 <http://git.warmcat.org/AmongUs>（136M / 677 个 .cs，
+> 含 Impostor 完整服务端实现），从此可以读逻辑而不是靠猜。
+
+---|---|---|
 | 1 | `SetActivePodType(0x15)` | ✗ |
 | 2 | Hello 的 4 字节（真实在线是随机值，本地是 0） | ✗ |
 | 3 | `Ready(0x07)` | ✗ |

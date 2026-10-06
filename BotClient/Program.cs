@@ -888,9 +888,17 @@ namespace BotClient
                     }
 
                     _seq++;
-                    var pkt = BuildPosition(_gameId, _cntNetId, _seq, _posX, _posY);
+                    // ★ 速度 = 朝当前路点的方向 × 步速（1 单位/秒），接收方靠它算走路动画
+                    float vx = 0f, vy = 0f;
+                    if (idx < path.Count)
+                    {
+                        float vdx = path[idx].x - _posX, vdy = path[idx].y - _posY;
+                        float vd = MathF.Sqrt(vdx * vdx + vdy * vdy);
+                        if (vd > 0.001f) { vx = vdx / vd * 1.0f; vy = vdy / vd * 1.0f; }
+                    }
+                    var pkt = BuildPosition(_gameId, _cntNetId, _seq, _posX, _posY, vx, vy);
                     if (_seq % 5 == 0)
-                        SendRaw($"位置({_posX:F1},{_posY:F1})→目标({tx:F1},{ty:F1})", pkt);
+                        SendRaw($"位置({_posX:F1},{_posY:F1})→目标({tx:F1},{ty:F1}) v=({vx:F1},{vy:F1})", pkt);
                     else
                         SendPos(pkt);
                 }
@@ -1001,7 +1009,16 @@ namespace BotClient
             ms.Write(nid, 0, nid.Length);
             ms.WriteByte((byte)(seq & 0xFF));
             ms.WriteByte((byte)(seq >> 8));
-            ms.WriteByte(0x01);                         // 标志：只含位置（实测可用）
+            // ★ 标志 0x01（只含位置）—— 这是**唯一实测可用**的取值。
+            //
+            // 试过的失败组合（两次都把正在进行的对局弄坏）：
+            //   · 0x03 + 速度(4)，同时把坐标范围改成 ±40  → 人全消失 + 连接中断
+            //   · 0x03 + 速度(4)，坐标范围保持 ±50        → 人全消失
+            //
+            // 结论：那个字节在 v19 里**不是**「脏位掩码」，
+            //       不能按 SetDirtyBit(3) 的语义去填 0x03。
+            //       在拿到 v19 的准确语义前，固定用 0x01。
+            ms.WriteByte(0x01);
             WriteVec(ms, x);  WriteVec(ms, y);          // 位置
             return ms.ToArray();
         }

@@ -526,9 +526,22 @@ namespace BotClient
                     Console.WriteLine($"      ★★★ MeetingHud netId={mhNet} → 开始投票（目标 pid={_voteFor}）");
                     if (_voteFor >= 0)
                     {
-                        Thread.Sleep(300);
-                        SendRaw($"CastVote(我={_playerId} → 投{_voteFor})",
-                                BuildRpc(_gameId, mhNet, 24, new byte[] { (byte)_playerId, (byte)_voteFor }));
+                        // ★ 不要一出现就投 —— 用户反馈「一拍桌就全投了」，太机械。
+                        //   真人会犹豫几秒，而且各人时机不同。
+                        //   这里每台随机等 3~10 秒，且彼此错开。
+                        int delayMs = 3000 + _rng.Next(7000);
+                        Console.WriteLine($"      → 犹豫 {delayMs / 1000.0:F1} 秒后投票…");
+                        var tv = new Thread(() =>
+                        {
+                            try
+                            {
+                                Thread.Sleep(delayMs);
+                                SendRaw($"CastVote(我={_playerId} → 投{_voteFor})",
+                                        BuildRpc(_gameId, mhNet, 24, new byte[] { (byte)_playerId, (byte)_voteFor }));
+                            }
+                            catch (Exception ex) { Console.WriteLine($"      [投票失败] {ex.Message}"); }
+                        }) { IsBackground = true };
+                        tv.Start();
                     }
                     return;
                 }

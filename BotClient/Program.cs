@@ -125,7 +125,14 @@ namespace BotClient
                 if (string.IsNullOrEmpty(gd))
                     gd = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                                       ".local/share/Steam/steamapps/common/Among Us");
-                int realGid = TryLoadGameId(Path.Combine(gd, "BepInEx/LogOutput.log"));
+                string lp2 = Path.Combine(gd, "BepInEx/LogOutput.log");
+                int realGid = -1;
+                // ★ 等一下：插件每秒才检查一次，而且 0（不在游戏中）要跳过
+                for (int w = 0; w < 20 && realGid < 0; w++)
+                {
+                    realGid = TryLoadGameId(lp2);
+                    if (realGid < 0) Thread.Sleep(500);
+                }
                 if (realGid >= 0 && realGid != gameId)
                 {
                     Console.WriteLine($"      ★ GameId 用日志里的 {realGid}（命令行给的是 {gameId}）");
@@ -760,7 +767,7 @@ namespace BotClient
         /// <summary>可走：在任一房间内，且不在任何障碍内</summary>
         private static bool Walkable(float x, float y)
         {
-            const float R = 0.25f;
+            const float R = 0.35f;   // ★ 离墙余量加大（原 0.25）—— 走路时不容易蹭到墙
             bool inRoom = false;
             lock (_boxes)
             {
@@ -903,8 +910,25 @@ namespace BotClient
                     {
                         float dx = path[idx].x - _posX, dy = path[idx].y - _posY;
                         float dist = MathF.Sqrt(dx * dx + dy * dy);
-                        if (dist < Step) { _posX = path[idx].x; _posY = path[idx].y; idx++; }
-                        else { _posX += dx / dist * Step; _posY += dy / dist * Step; }
+                        float nx, ny;
+                        if (dist < Step) { nx = path[idx].x; ny = path[idx].y; }
+                        else { nx = _posX + dx / dist * Step; ny = _posY + dy / dist * Step; }
+
+                        // ★★ 避墙：这一步的**终点**和**中点**都必须可走。
+                        //    只查终点不够 —— 起点和终点都在合法区、中间却隔着墙角时，
+                        //    直线走过去就会蹭墙/穿角（实测出现过）。
+                        bool clear = Walkable(nx, ny) &&
+                                     Walkable((_posX + nx) / 2f, (_posY + ny) / 2f);
+                        if (clear)
+                        {
+                            if (dist < Step) idx++;      // 到达这个路点
+                            _posX = nx; _posY = ny;
+                        }
+                        else
+                        {
+                            // 前面被挡 → 丢掉当前路径，下一轮重新规划（A* 会绕开）
+                            path.Clear(); idx = 0;
+                        }
                     }
 
                     _seq++;
@@ -1537,7 +1561,13 @@ namespace BotClient
                 for (int i = lines.Length - 1; i >= 0; i--)
                 {
                     var m = System.Text.RegularExpressions.Regex.Match(lines[i], @"\[GAME\] ★ GameId = (-?\d+)");
-                    if (m.Success && int.TryParse(m.Groups[1].Value, out int g)) return g;
+                    if (!m.Success) continue;
+                    if (!int.TryParse(m.Groups[1].Value, out int g)) continue;
+                    // ★ 跳过 0 和负数：GameId=0 表示「不在任何游戏里」，
+                    //   它是房主离开房间时的瞬时值，日志里经常夹在中间。
+                    //   实测踩过这个坑：读到 0 → JoinGame 被拒 → 只有 2/14 就位。
+                    if (g <= 0) continue;
+                    return g;
                 }
             }
             catch { }

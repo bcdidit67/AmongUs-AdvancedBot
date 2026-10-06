@@ -939,7 +939,10 @@ namespace BotClient
                     _seq++;                            // ★ 序列号必须自增！
                                                        //   之前被误删，导致永远发 seq=0，
                                                        //   房主当成过期包忽略掉。
-                    var pkt = BuildPosition(_gameId, _cntNetId, _seq, _posX, _posY);
+                    // ★ 速度：由位移推出来。它决定接收方的走路动画与插值走向。
+                    float vx = _dx * Step / 0.2f;     // Step/间隔(0.2s) ≈ 每秒位移
+                    float vy = _dy * Step / 0.2f;
+                    var pkt = BuildPosition(_gameId, _cntNetId, _seq, _posX, _posY, vx, vy);
                     if (_seq % 5 == 0)
                         SendRaw($"位置({_posX:F1},{_posY:F1})", pkt);   // 每秒打一次日志
                     else
@@ -1018,16 +1021,35 @@ namespace BotClient
             }
         }
 
-        /// <summary>构造 CustomNetworkTransform 的位置更新包（Normal 包）</summary>
-        private static byte[] BuildPosition(int gameId, int cntNetId, ushort seq, float x, float y)
+        /// <summary>
+        /// 构造 CustomNetworkTransform 的更新包（Normal 包）。
+        ///
+        /// ★★★ 格式来自源码（CustomNetworkTransform.Serialize 的增量路径）：
+        ///     this.lastSequenceId += 1;
+        ///     writer.Write(this.lastSequenceId);              // uint16 序列号
+        ///     this.WriteVector2(this.body.position, writer);  // 位置 (2×uint16)
+        ///     this.WriteVector2(this.body.velocity, writer);  // ★ 速度 (2×uint16)
+        ///
+        /// 我们之前发的格式是错的：
+        ///     错误: netId | seq | flags(0x01) | x | y          ← 多了 flags、少了速度
+        ///     正确: netId | seq | x | y | vx | vy              ← 没有 flags
+        ///
+        /// 少了速度的后果：接收方从**错误的偏移**去读速度，读到的是垃圾值，
+        /// 于是插值乱套 —— 表现出来就是「滑行、抖动、没有走路动画」。
+        /// 而走路动画本来就是由速度驱动的。
+        ///
+        /// 另外坐标范围是 FloatRange(-40, 40)，不是公开文档写的 ±50。
+        /// </summary>
+        private static byte[] BuildPosition(int gameId, int cntNetId, ushort seq, float x, float y, float vx, float vy)
         {
             var nid = PackUInt32((uint)cntNetId);
 
-            int subLen = nid.Length + 2 + 1 + 4;        // netId + seq + flags + 位置(2×uint16)
-            int gdLen = 4 + 2 + 1 + subLen;             // gameId + 子长度 + tag + 内容
+            // netId + seq(2) + 位置(4) + 速度(4)
+            int subLen = nid.Length + 2 + 4 + 4;
+            int gdLen = 4 + 2 + 1 + subLen;
 
             using var ms = new System.IO.MemoryStream();
-            ms.WriteByte(0x00);                         // Normal 包（与抓包一致）
+            ms.WriteByte(0x00);                         // Normal 包（与真实抓包一致）
             ms.WriteByte((byte)(gdLen & 0xFF));
             ms.WriteByte((byte)((gdLen >> 8) & 0xFF));
             ms.WriteByte(0x05);                         // GameData
@@ -1036,20 +1058,27 @@ namespace BotClient
             ms.WriteByte((byte)((subLen >> 8) & 0xFF));
             ms.WriteByte(0x01);                         // tag = Data
             ms.Write(nid, 0, nid.Length);
-            ms.WriteByte((byte)(seq & 0xFF));           // 序列号（小端）
+            ms.WriteByte((byte)(seq & 0xFF));
             ms.WriteByte((byte)(seq >> 8));
-            ms.WriteByte(0x01);                         // 标志位：只含位置
-            ms.WriteByte((byte)EncX(x));
-            ms.WriteByte((byte)(EncX(x) >> 8));
-            ms.WriteByte((byte)EncX(y));
-            ms.WriteByte((byte)(EncX(y) >> 8));
+            WriteVec(ms, x);  WriteVec(ms, y);          // 位置
+            WriteVec(ms, vx); WriteVec(ms, vy);         // ★ 速度（动画靠它）
             return ms.ToArray();
         }
 
-        /// <summary>坐标 → uint16（raw/65535 映射到 [-50,50]）</summary>
+        private static void WriteVec(System.IO.MemoryStream ms, float v)
+        {
+            int raw = EncX(v);
+            ms.WriteByte((byte)(raw & 0xFF));
+            ms.WriteByte((byte)((raw >> 8) & 0xFF));
+        }
+
+        /// <summary>
+        /// 坐标/速度 → uint16。
+        /// 范围取源码里的 FloatRange(-40, 40)，**不是**公开文档写的 ±50。
+        /// </summary>
         private static int EncX(float v)
         {
-            float t = (v + 50f) / 100f;
+            float t = (v + 40f) / 80f;
             if (t < 0f) t = 0f;
             if (t > 1f) t = 1f;
             return (int)(t * 65535f);

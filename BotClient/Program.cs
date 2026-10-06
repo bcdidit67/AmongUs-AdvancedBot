@@ -105,6 +105,7 @@ namespace BotClient
 
             // 1.2 ★ 启动「拍桌」监听线程（外部建触发文件即可让它按紧急按钮）
             new Thread(PressLoop) { IsBackground = true }.Start();
+            new Thread(KillLoop) { IsBackground = true }.Start();   // ★ 刀人监听
 
             // 1.5 ★ 载入可行走网格（由游戏内插件写进 BepInEx 日志）
             //     没有网格也能跑，只是会退回「穿墙」的旧行为。
@@ -549,6 +550,15 @@ namespace BotClient
                     return;
                 }
 
+                // ★ 记录**所有**玩家的 Spawn（owner + 首个组件 netId）
+                //   刀的载荷需要「目标 PlayerControl 的 netId」，必须能查到。
+                if (st == 4)
+                {
+                    int save = i;
+                    int pcNet = (int)ReadPacked(d, ref save);
+                    Console.WriteLine($"      · 玩家 Spawn: clientId={owner} PlayerControl netId={pcNet}");
+                }
+
                 if (st != 4 || owner != (uint)_myClientId) return;
 
                 Console.WriteLine($"      ★★★ 我的玩家 Spawn: components={ncomp}");
@@ -968,6 +978,43 @@ namespace BotClient
                             BuildRpc(_gameId, _ourNetId, 11, new byte[] { 0xFF }));
                 }
                 catch (Exception e) { Console.WriteLine($"      [拍桌失败] {e.Message}"); }
+            }
+        }
+
+
+        // ═══════════════════════════════════════════════════════════
+        // ★★★ 刀人（只有内鬼能成功）★★★
+        //
+        // 源码依据（PlayerControl.RpcMurderPlayer）：
+        //     StartRpcImmediately(this.NetId, 12, Reliable, -1);
+        //     messageWriter.WriteNetObject(target);      // 目标的 netId
+        // 房主侧 MurderPlayer 会校验：
+        //     !target || Data.IsDead || !Data.IsImpostor || Data.Disconnected  → 拒绝
+        //   （所以说「不是内鬼就刀不动」是原版逻辑说了算，不是我们限制的）
+        //
+        // 触发：/tmp/kill-<我的pid>.trigger，内容是**目标的 PlayerControl netId**
+        // ═══════════════════════════════════════════════════════════
+        private static void KillLoop()
+        {
+            string trig = $"/tmp/kill-{Environment.ProcessId}.trigger";
+            while (true)
+            {
+                try
+                {
+                    Thread.Sleep(500);
+                    if (!File.Exists(trig)) continue;
+                    string txt = File.ReadAllText(trig).Trim();
+                    File.Delete(trig);
+                    if (_ourNetId < 0) { Console.WriteLine("      [刀] 还没有角色，跳过"); continue; }
+                    if (!int.TryParse(txt, out int targetNet))
+                    { Console.WriteLine($"      [刀] 触发文件内容不是 netId: '{txt}'"); continue; }
+
+                    Console.WriteLine($"      ★★★ 刀！目标 netId={targetNet}");
+                    // WriteNetObject 就是 packed netId
+                    SendRaw($"MurderPlayer(目标 netId={targetNet})",
+                            BuildRpc(_gameId, _ourNetId, 12, PackUInt32((uint)targetNet)));
+                }
+                catch (Exception e) { Console.WriteLine($"      [刀失败] {e.Message}"); }
             }
         }
 

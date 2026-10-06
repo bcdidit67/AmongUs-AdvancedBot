@@ -87,11 +87,17 @@ done
 [ "$n" -gt 0 ] && echo "  🧹 已清理 $n 个遗留 bot"
 
 # ── 6. 启动 ──
+# 用法: test-bot.sh [颜色] [playerId] [名字] [日志文件]
 COLOR="${1:-1}"
+PID_ARG="${2:-1}"
+NAME="${3:-BotTest}"
+LOGF="${4:-/tmp/bot.log}"
 echo
-echo "════════ 启动 bot（颜色=$COLOR）════════"
+echo "════════ 启动 bot ════════"
+echo "  名字=$NAME  颜色=$COLOR  playerId=$PID_ARG  日志=$LOGF"
 cd "$DIR"
-nohup dotnet bin/Release/net6.0/BotClient.dll 32 50663600 BotTest 0 0 8 "$COLOR" 1 > /tmp/bot.log 2>&1 &
-echo $! > /tmp/bot.pid
-echo "  PID: $(cat /tmp/bot.pid)"
+# 参数顺序: gameId version user seconds _rpcNetId _netBase color forcePid rpcTarget
+nohup dotnet bin/Release/net6.0/BotClient.dll 32 50663600 "$NAME" 0 0 8 "$COLOR" "$PID_ARG" > "$LOGF" 2>&1 &
+echo $! > "/tmp/bot-$PID_ARG.pid"
+echo "  PID: $(cat /tmp/bot-$PID_ARG.pid)"
 exit 0

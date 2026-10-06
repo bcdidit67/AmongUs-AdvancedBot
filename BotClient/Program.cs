@@ -41,6 +41,7 @@ namespace BotClient
         private static float _posX, _posY;
         private static ushort _seq;
         private static bool _moving;
+        private static string _userName = "BotTest";   // 名字（多个人机时各不相同）
         private static int _dir = 1;   // 1=右, -1=左
         private const float Step = 0.20f;   // 每帧位移
         private static float _dx = 1f, _dy;   // 当前游走方向
@@ -95,6 +96,7 @@ namespace BotClient
             rx.Start();
 
             // 1. Hello
+            _userName = user;
             SendRaw("Hello(发起)", BuildHello(NextNonce(), version, user));
             Thread.Sleep(300);
 
@@ -528,7 +530,7 @@ namespace BotClient
 
                     Thread.Sleep(150);
                     SendRaw($"CheckName/CheckColor(netId={_ourNetId})",
-                            BuildCheckNameColor(_gameId, _ourNetId, _playerId, "BotTest", _color));
+                            BuildCheckNameColor(_gameId, _ourNetId, _playerId, _userName, _color));
 
                     // ★ 名字设完之后，补上真实客户端序列里的其余部分（装扮 / Ready）
                     //   全部打在**房主分配的** netId 上，而不是我们猜测的编号。

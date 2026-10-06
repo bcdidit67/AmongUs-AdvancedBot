@@ -8,6 +8,8 @@
 #   于是拿到相同的 id。间隔几秒顺序加入最稳。
 #
 # 用法:  ./multi-bot.sh [数量] [起始颜色] [投票目标playerId]
+#   GAP 环境变量控制「每台就位后再等几秒」默认 2 秒；
+#   人机多或房主卡时可调大：GAP=4 ./multi-bot.sh 14 1
 #   第三个参数 = 内鬼的 playerId，给了就会在会议开始时投票给他
 # ═══════════════════════════════════════════════════════════════
 set -u
@@ -63,11 +65,25 @@ for i in $(seq 0 $((N-1))); do
     # 参数: gameId version user seconds _rpcNetId _netBase color forcePid rpcTarget voteFor
     nohup dotnet bin/Release/net6.0/BotClient.dll 32 50663600 "$NAME" 0 0 8 "$COLOR" "$PID_ARG" 0 "$VOTE" > "$LOGF" 2>&1 &
     echo "     PID $!  →  $LOGF"
-    # 等这个人的角色真正被房主创建出来（收到 Spawn）再放下一个
-    for t in $(seq 1 12); do
+    # ★ 等这个人的角色真正被房主创建出来（收到 Spawn）再放下一个
+    ok=0
+    for t in $(seq 1 20); do
         sleep 1
-        grep -q '玩家 netId=' "$LOGF" 2>/dev/null && { echo "     ✅ 已就位（$t 秒）"; break; }
+        grep -q '玩家 netId=' "$LOGF" 2>/dev/null && { echo "     ✅ 已就位（$t 秒）"; ok=1; break; }
+        # 被服务端断开就别等了
+        grep -q '被服务端断开' "$LOGF" 2>/dev/null && { echo "     ❌ 被断开（$t 秒）"; break; }
     done
+
+    # ★★ 就位之后再等一会儿才放下一个。
+    #    房主的 SendInitialData 会把「当前所有对象」序列化发给新人，
+    #    越往后越重；14 台 1 秒一台地挤进去会把房主击穿
+    #    （实测：前 5 台顺利，第 6 台开始房主状态机错乱 → IncorrectGame → 后面全失败）。
+    if [ "$ok" = "1" ]; then
+        sleep "${GAP:-2}"
+    else
+        echo "     ⚠️ 这一台没就位，多等 4 秒让房主缓一缓"
+        sleep 4
+    fi
 done
 
 echo

@@ -107,6 +107,7 @@ namespace BotClient
             // 1.2 ★ 启动「拍桌」监听线程（外部建触发文件即可让它按紧急按钮）
             new Thread(PressLoop) { IsBackground = true }.Start();
             new Thread(KillLoop) { IsBackground = true }.Start();   // ★ 刀人监听
+            new Thread(SceneWatchLoop) { IsBackground = true }.Start();  // ★ 阶段变化时重发 SceneChange
 
             {
                 string g2 = Environment.GetEnvironmentVariable("AMONGUS_DIR");
@@ -858,7 +859,7 @@ namespace BotClient
         private static bool Walkable(float x, float y)
         {
             // ★ 有真实形状就用真实形状（插件已导出 [POLY]）
-            lock (_polys) { if (_polys.Count > 0) return WalkablePoly(x, y); }
+            lock (_polys) { if (_polys.Count > 0) return WalkableBody(x, y); }
 
             const float R = 0.35f;
             bool inArea = false, onGround = false, hasArea = false;
@@ -1788,6 +1789,28 @@ namespace BotClient
         }
 
         /// <summary>
+        /// ★★ 带半径的可走判定 —— 判**一圈点**，不只是一个点。
+        ///
+        /// 实测（4336 个轨迹点）：只判中心点时，8.5% 的位置虽然在区域外/障碍内
+        /// 却仍被判为可走 —— 因为角色有半径（约 0.36），
+        /// 中心点合法但**身体已经压在墙上或家具上**。
+        ///
+        /// 这里取中心 + 半径上 8 个方向共 9 个点，**全部**合法才算可走。
+        /// </summary>
+        private const float BodyR = 0.36f;
+
+        private static bool WalkableBody(float x, float y)
+        {
+            if (!WalkablePoly(x, y)) return false;
+            for (int k = 0; k < 8; k++)
+            {
+                float a = k * MathF.PI / 4f;
+                if (!WalkablePoly(x + MathF.Cos(a) * BodyR, y + MathF.Sin(a) * BodyR)) return false;
+            }
+            return true;
+        }
+
+        /// <summary>
         /// 可走：在任一 layer2 区域内 且 在任一 layer9 地板上 且 不在任何 layer12 障碍内。
         /// 三层都用**真实顶点**判定，不再用包围盒（包围盒会把不规则房间补成直角，
         /// 补出来的部分正好是红区 —— 表现为「穿墙后在墙内活动」）。
@@ -1807,6 +1830,64 @@ namespace BotClient
                 if (hasArea && hasGround) return inArea && onGround;
                 if (hasArea) return inArea;
                 return onGround;
+            }
+        }
+
+
+        /// <summary>
+        /// ★★★ 阶段变化时重发 SceneChange ★★★
+        ///
+        /// 房主的流程（源码）：
+        ///     OnPlayerChangedScene(client, scene)
+        ///         → client.InScene = true
+        ///         → SendInitialData(client.Id)     // 把当前所有对象发给这个客户端
+        ///         → CreatePlayer(client)           // 给他在**当前场景**里建角色
+        ///
+        /// 真客户端每次进新场景都会自己发一次 SceneChange ——
+        /// 而我们的人机只在加入时发过一次大厅那次，
+        /// 于是进地图后房主**没有**为我们建角色：
+        ///   netId 还是大厅的、位置还是大厅的、发出去的位置落在过期对象上，
+        ///   表现出来就是「站着不动 / 位置停在大厅」。
+        ///
+        /// 这里监听插件输出的 [GRID] 阶段 = SHIP/LOBBY，
+        /// 一旦发现阶段变了就重发 ClientInfo + SceneChange。
+        /// </summary>
+        private static void SceneWatchLoop()
+        {
+            string last = "";
+            while (true)
+            {
+                try
+                {
+                    Thread.Sleep(1000);
+                    string gd = Environment.GetEnvironmentVariable("AMONGUS_DIR");
+                    if (string.IsNullOrEmpty(gd))
+                        gd = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                                          ".local/share/Steam/steamapps/common/Among Us");
+                    string lp = Path.Combine(gd, "BepInEx/LogOutput.log");
+                    if (!File.Exists(lp)) continue;
+
+                    // 读最后一条 [GRID] 阶段
+                    string phase = "";
+                    var lines = File.ReadAllLines(lp);
+                    for (int i = lines.Length - 1; i >= 0; i--)
+                    {
+                        var m = System.Text.RegularExpressions.Regex.Match(lines[i], @"\[GRID\] 阶段 = (\w+)");
+                        if (m.Success) { phase = m.Groups[1].Value; break; }
+                    }
+                    if (string.IsNullOrEmpty(phase) || phase == last) continue;
+                    if (last == "") { last = phase; continue; }      // 第一次只记录
+                    last = phase;
+
+                    if (_myClientId < 0 || _gameId <= 0) continue;
+                    Console.WriteLine($"      ★★★ 阶段变为 {phase} —— 重发 ClientInfo + SceneChange（让房主在新场景建角色）");
+                    _ourNetId = -1; _cntNetId = -1;
+                    Thread.Sleep(1500);
+                    SendRaw("ClientInfo(换场景)", BuildClientInfo(_gameId, _myClientId, 2));
+                    Thread.Sleep(300);
+                    SendRaw("SceneChange(换场景)", BuildSceneChange(_gameId, _myClientId, "OnlineGame"));
+                }
+                catch (Exception e) { Console.WriteLine($"      [场景监听] {e.Message}"); }
             }
         }
 

@@ -1,4 +1,5 @@
 using System;
+using UnityEngine;
 using BepInEx.Logging;
 using HarmonyLib;
 using Hazel;
@@ -46,6 +47,122 @@ namespace ProtoDump
         // 与其继续猜 Hello 的字段（Hazel 版本字节、字段顺序…），
         // 不如直接把游戏自己发的那串字节抄下来 —— 那是服务端**已经接受过**的格式。
         // ═══════════════════════════════════════════════════════════
+        // ═══════════════════════════════════════════════════════════
+        // ★★★ 可行走网格 —— 让人机不穿墙 ★★★
+        //
+        // 人机是**外置进程**，没有游戏的物理引擎，算不出哪里是墙。
+        // 但本插件跑在游戏进程里，可以做重叠检测 ——
+        // 所以由插件**预计算一张网格**，人机读进去自己做碰撞。
+        //
+        // 墙的层：Constants.ShipOnlyMask = LayerMask.GetMask("Ship")
+        // 判据：  Physics2D.OverlapCircle(世界坐标, 玩家半径, ShipOnlyMask)
+        //
+        // 坐标约定（与 BotClient 严格一致）：
+        //   原点 (0,0) 为世界原点，格子边长 CELL
+        //   格 (i,j) 的世界坐标 = ( -GW*CELL/2 + i*CELL + CELL/2 ,
+        //                          -GH*CELL/2 + j*CELL + CELL/2 )
+        //   输出：'1'=可走  '0'=墙
+        // ═══════════════════════════════════════════════════════════
+        internal const int GW = 96;
+        internal const int GH = 96;
+        internal const float CELL = 0.5f;
+        private const float PlayerRadius = 0.30f;   // 略小于真实半径，避免过度保守
+        private static bool _gridDumped;
+
+        internal static void TickGrid()
+        {
+            if (_gridDumped) return;
+            try
+            {
+                // ⚠️ 只等 LobbyBehaviour —— **不能等 ShipStatus**：
+                //    ShipStatus 是真正的游戏地图，开局后才加载；
+                //    大厅（LobbyBehaviour）是独立场景，里面根本没有 ShipStatus。
+                //    之前多写了这一句，导致网格在大厅阶段永远生成不出来。
+                if (LobbyBehaviour.Instance == null) return;
+
+                // ★ 先诊断：看看大厅里的碰撞体到底分布在哪些层
+                //   （用 ShipOnlyMask 采出来 9027/9216 都是可走 —— 说明墙不在 "Ship" 层）
+                try
+                {
+                    var all = Physics2D.OverlapCircleAll(Vector2.zero, 40f);
+                    var byLayer = new System.Collections.Generic.Dictionary<int, int>();
+                    int total = 0;
+                    if (all != null)
+                        foreach (var c in all)
+                        {
+                            if (c == null) continue;
+                            total++;
+                            int L = c.gameObject.layer;
+                            byLayer[L] = byLayer.TryGetValue(L, out var v) ? v + 1 : 1;
+                        }
+                    var sbL = new System.Text.StringBuilder();
+                    sbL.Append($"[GRID] 半径40内共 {total} 个碰撞体，按层分布: ");
+                    foreach (var kv in byLayer) sbL.Append($"layer{kv.Key}={kv.Value} ");
+                    Plugin.L.LogWarning(sbL.ToString());
+                    Plugin.L.LogWarning($"[GRID] ShipOnlyMask={Constants.ShipOnlyMask}  AllLayers={Physics2D.AllLayers}");
+                }
+                catch (Exception e3) { Plugin.L.LogWarning($"[GRID] 层诊断失败: {e3.Message}"); }
+
+                // ★ 用所有层采样（老 Mod 的 Blocked() 也是不设掩码的）
+                //   注意：OverlapCircle 不返回 trigger，所以开关/按钮不会误判成墙。
+                int shipMask = Physics2D.AllLayers;
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine($"[GRID] BEGIN {GW} {GH} {CELL}");
+                for (int j = 0; j < GH; j++)
+                {
+                    var row = new char[GW];
+                    for (int i = 0; i < GW; i++)
+                    {
+                        float x = -(GW * CELL) / 2f + i * CELL + CELL / 2f;
+                        float y = -(GH * CELL) / 2f + j * CELL + CELL / 2f;
+                        bool blocked;
+                        try { blocked = Physics2D.OverlapCircle(new Vector2(x, y), PlayerRadius, shipMask) != null; }
+                        catch { blocked = true; }
+                        row[i] = blocked ? '0' : '1';
+                    }
+                    sb.AppendLine(new string(row));
+                }
+                sb.AppendLine("[GRID] END");
+                Plugin.L.LogWarning(sb.ToString());
+                _gridDumped = true;
+                Plugin.L.LogWarning($"[GRID] ✅ 可行走网格已输出（{GW}x{GH}，格子 {CELL}，半径 {PlayerRadius}）");
+
+                // ═══════════════════════════════════════════════════════
+                // ★★★ 碰撞体真实几何导出 ★★★
+                //
+                // 采样网格会漏 —— 采样点若正好落在薄墙两侧的空隙里就探不到，
+                // 结果机器人一路走出大厅（实测跑到 x=22.8）。
+                //
+                // 改成直接把场景里每个 Collider2D 的**世界包围盒**导出，
+                // 一个都不会漏。包围盒偏保守（斜墙会被放大成矩形），
+                // 但大厅的碰撞体基本都是矩形，够用。
+                // ═══════════════════════════════════════════════════════
+                try
+                {
+                    var cols = UnityEngine.Object.FindObjectsOfType<Collider2D>();
+                    var sb2 = new System.Text.StringBuilder();
+                    int cnt = 0;
+                    sb2.AppendLine($"[COL] BEGIN {cols?.Length ?? 0}");
+                    if (cols != null)
+                        foreach (var c in cols)
+                        {
+                            if (c == null) continue;
+                            var b = c.bounds;
+                            // 跳过小得没意义的（按钮、图标等）
+                            if (b.size.x < 0.05f || b.size.y < 0.05f) continue;
+                            cnt++;
+                            sb2.AppendLine($"{c.gameObject.layer} {b.min.x:F3} {b.min.y:F3} {b.max.x:F3} {b.max.y:F3} {c.GetType().Name} {c.gameObject.name.Replace(' ', '_')}");
+                        }
+                    sb2.AppendLine("[COL] END");
+                    Plugin.L.LogWarning(sb2.ToString());
+                    Plugin.L.LogWarning($"[COL] ✅ 碰撞体几何已导出：{cnt} 个（跳过尺寸过小的）");
+                }
+                catch (Exception e4) { Plugin.L.LogError($"[COL] 导出失败: {e4.Message}"); }
+            }
+            catch (Exception e) { Plugin.L.LogError($"[GRID] 生成失败: {e.Message}"); }
+        }
+
+
         [HarmonyPatch(typeof(Hazel.Udp.UdpConnection), nameof(Hazel.Udp.UdpConnection.SendHello))]
         internal static class Patch_SendHello
         {

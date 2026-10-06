@@ -1,4 +1,5 @@
 using System;
+using System.IO;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -41,6 +42,10 @@ namespace BotClient
         private static ushort _seq;
         private static bool _moving;
         private static int _dir = 1;   // 1=右, -1=左
+        private const float Step = 0.20f;   // 每帧位移
+        private static float _dx = 1f, _dy;   // 当前游走方向
+        private static int _dirFrames;        // 还有几帧换方向
+        private static readonly Random _rng = new Random();
         private static int _myClientId = -1;
         private static int _playerId = -1;   // >=0 时强制使用该 playerId
         private static byte _color = 0x02;   // 2 = GREEN，避开红色
@@ -92,6 +97,21 @@ namespace BotClient
             // 1. Hello
             SendRaw("Hello(发起)", BuildHello(NextNonce(), version, user));
             Thread.Sleep(300);
+
+            // 1.5 ★ 载入可行走网格（由游戏内插件写进 BepInEx 日志）
+            //     没有网格也能跑，只是会退回「穿墙」的旧行为。
+            if (!TryLoadGrid())
+                Console.WriteLine("      ⚠️ 未载入网格 —— 移动将不做碰撞（会穿墙）");
+            {
+                string g2 = Environment.GetEnvironmentVariable("AMONGUS_DIR");
+                if (string.IsNullOrEmpty(g2))
+                    g2 = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                                      ".local/share/Steam/steamapps/common/Among Us");
+                string lp = Path.Combine(g2, "BepInEx/LogOutput.log");
+                if (!TryLoadRoom(lp))
+                    Console.WriteLine("      ⚠️ 未解析到房间边界 —— 可能会走出大厅");
+                TryLoadObstacles(lp);
+            }
 
             // 2. JoinGame
             SendRaw("JoinGame", BuildJoinGame(gameId));
@@ -529,6 +549,232 @@ namespace BotClient
             catch (Exception e) { Console.WriteLine($"      [Spawn 解析失败] {e.Message}"); }
         }
 
+
+        // ═══════════════════════════════════════════════════════════
+        // ★★★ 可行走网格 —— 让人机不穿墙 ★★★
+        //
+        // 人机是外置进程，没有游戏的物理引擎，算不出哪里是墙。
+        // 解决办法：由游戏内的 ProtoDump 插件用 Physics2D.OverlapCircle
+        // 预计算一张网格并写进 BepInEx 日志，人机直接读日志里的网格。
+        //
+        // 格式（与插件 PacketWatch.TickGrid 严格一致）：
+        //   [GRID] BEGIN <宽> <高> <格子边长>
+        //   <每行一个 0/1 字符串，'1'=可走 '0'=墙>
+        //   [GRID] END
+        //
+        // 坐标映射：格 (i,j) 的世界坐标 =
+        //   x = -W*CELL/2 + i*CELL + CELL/2
+        //   y = -H*CELL/2 + j*CELL + CELL/2
+        // ═══════════════════════════════════════════════════════════
+        private static char[][] _grid;
+        private static int _gw, _gh;
+        private static float _gcell;
+
+        /// <summary>从游戏日志里读取可行走网格（找不到就返回 false，退化为旧行为）</summary>
+        private static bool TryLoadGrid()
+        {
+            try
+            {
+                string game = Environment.GetEnvironmentVariable("AMONGUS_DIR");
+                if (string.IsNullOrEmpty(game))
+                    game = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                                        ".local/share/Steam/steamapps/common/Among Us");
+                string log = Path.Combine(game, "BepInEx/LogOutput.log");
+                if (!File.Exists(log)) { Console.WriteLine($"      [网格] 日志不存在: {log}"); return false; }
+
+                var lines = File.ReadAllLines(log);
+                int begin = -1;
+                for (int i = lines.Length - 1; i >= 0; i--)
+                {
+                    if (lines[i].Contains("[GRID] BEGIN")) { begin = i; break; }
+                }
+                if (begin < 0) { Console.WriteLine("      [网格] 日志里没有网格（插件是否已重载？）"); return false; }
+
+                var parts = lines[begin].Substring(lines[begin].IndexOf("[GRID] BEGIN")).Split(' ');
+                _gw = int.Parse(parts[2]);
+                _gh = int.Parse(parts[3]);
+                _gcell = float.Parse(parts[4], System.Globalization.CultureInfo.InvariantCulture);
+
+                _grid = new char[_gh][];
+                for (int j = 0; j < _gh; j++)
+                {
+                    string row = lines[begin + 1 + j];
+                    int k = row.IndexOf('1');
+                    int z = row.IndexOf('0');
+                    int start = (k >= 0 && (z < 0 || k < z)) ? k : z;
+                    if (start < 0) start = 0;
+                    _grid[j] = row.Substring(start, _gw).ToCharArray();
+                }
+                Console.WriteLine($"      ★★★ 已载入可行走网格 {_gw}x{_gh} 格子={_gcell}");
+                return true;
+            }
+            catch (Exception e) { Console.WriteLine($"      [网格] 读取失败: {e.Message}"); return false; }
+        }
+
+        /// <summary>世界坐标是否可走</summary>
+        private static bool Walkable(float x, float y)
+        {
+            if (_grid == null) return true;                  // 没有网格就退回旧行为
+            int i = WorldToI(x);
+            int j = WorldToJ(y);
+            if (i < 0 || j < 0 || i >= _gw || j >= _gh) return false;   // 出图 = 不可走
+            return _grid[j][i] == '1';
+        }
+
+
+        /// <summary>
+        /// 找离 (x,y) 最近的可走格，返回它相对于当前位置的方向。
+        ///
+        /// 为什么需要：网格是用 OverlapCircle(半径 0.30) 采样的，
+        /// 中央那块实体会被**放大**，而玩家的真实出生点恰好落在里面 ——
+        /// 于是机器人一出生就「站墙里」，左右都是墙，原地打转。
+        /// 有了这个，它就能先走出来，再正常避墙。
+        /// </summary>
+        private static bool FindNearestOpen(float x, float y, out float dx, out float dy)
+        {
+            dx = dy = 0f;
+            if (_grid == null) return false;
+            int ci = WorldToI(x), cj = WorldToJ(y);
+            for (int r = 1; r <= 20; r++)          // 螺旋搜索，最多 20 格（10 单位）
+            {
+                for (int dj = -r; dj <= r; dj++)
+                for (int di = -r; di <= r; di++)
+                {
+                    if (Math.Abs(di) != r && Math.Abs(dj) != r) continue;   // 只看外圈
+                    int i = ci + di, j = cj + dj;
+                    if (i < 0 || j < 0 || i >= _gw || j >= _gh) continue;
+                    if (_grid[j][i] != '1') continue;
+                    dx = di; dy = dj;
+                    float len = MathF.Sqrt(dx * dx + dy * dy);
+                    if (len > 0) { dx /= len; dy /= len; }
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private static int WorldToI(float x) => (int)MathF.Round((x + _gw * _gcell / 2f - _gcell / 2f) / _gcell);
+        private static int WorldToJ(float y) => (int)MathF.Round((y + _gh * _gcell / 2f - _gcell / 2f) / _gcell);
+
+
+        // ═══════════════════════════════════════════════════════════
+        // ★★★ 房间边界 —— 来自插件导出的 ShipRoom 包围盒 ★★★
+        //
+        // 教训：采样网格抓不到**空心的墙圈**（采样点落进房间内部自然探不到墙），
+        //       所以机器人一路走出大厅（实测跑到 x=22.8）。
+        //
+        // 而插件导出的碰撞体几何里，ShipRoom 就是那圈墙：
+        //       35.3  L9  x[-3.45, 3.46] y[-1.63, 3.46]  ShipRoom
+        //       （实测大厅只有 7×5 单位）
+        //
+        // 所以：**边界用几何（不会漏），障碍物用网格（实心物体很准）**。
+        // ═══════════════════════════════════════════════════════════
+        private static bool _haveRoom;
+        private static float _roomMinX, _roomMinY, _roomMaxX, _roomMaxY;
+
+        /// <summary>从游戏日志里的 [COL] 段解析出 ShipRoom 的包围盒</summary>
+        private static bool TryLoadRoom(string logPath)
+        {
+            try
+            {
+                var lines = File.ReadAllLines(logPath);
+                int begin = -1;
+                for (int i = lines.Length - 1; i >= 0; i--)
+                    if (lines[i].Contains("[COL] BEGIN")) { begin = i; break; }
+                if (begin < 0) return false;
+
+                float best = 0f;
+                for (int i = begin + 1; i < lines.Length; i++)
+                {
+                    var L = lines[i];
+                    if (L.Contains("[COL] END")) break;
+                    var f = L.Split(' ');
+                    if (f.Length < 7) continue;
+                    if (!L.Contains("ShipRoom")) continue;         // ★ 只认 ShipRoom
+                    if (!float.TryParse(f[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var x0)) continue;
+                    float.TryParse(f[2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var y0);
+                    float.TryParse(f[3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var x1);
+                    float.TryParse(f[4], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var y1);
+                    float area = (x1 - x0) * (y1 - y0);
+                    if (area > best) { best = area; _roomMinX = x0; _roomMinY = y0; _roomMaxX = x1; _roomMaxY = y1; }
+                }
+                if (best <= 0f) return false;
+                _haveRoom = true;
+                Console.WriteLine($"      ★★★ 房间边界: x[{_roomMinX:F2},{_roomMaxX:F2}] y[{_roomMinY:F2},{_roomMaxY:F2}]");
+                return true;
+            }
+            catch (Exception e) { Console.WriteLine($"      [房间] 解析失败: {e.Message}"); return false; }
+        }
+
+        /// <summary>是否在房间内（留 0.3 的余量，避免贴着墙皮）</summary>
+        private static bool InRoom(float x, float y)
+        {
+            if (!_haveRoom) return true;
+            const float M = 0.30f;
+            return x > _roomMinX + M && x < _roomMaxX - M && y > _roomMinY + M && y < _roomMaxY - M;
+        }
+
+
+        // ═══════════════════════════════════════════════════════════
+        // ★★★ 障碍物列表（几何）★★★
+        //
+        // 为什么放弃采样网格：
+        //   实测导出显示 Lobby(Clone) 21.0 L9 x[-2.73,2.81] y[-0.79,3.00]
+        //   —— 那是**大厅地板**，但它在 Ship 层，
+        //   于是采样时把整个大厅内部标成了「不可走」，
+        //   连机器人的出生点都被判成墙里。
+        //
+        // 改用几何：容器 = ShipRoom（住里面），
+        //           障碍物 = 面积 < 5 的实体（Leftbox / RightBox / StartButton）
+        //           地板(21.0) 和 摇杆区(59.6) 因面积大而自然被排除。
+        // ═══════════════════════════════════════════════════════════
+        private static readonly System.Collections.Generic.List<(float x0, float y0, float x1, float y1)> _obstacles
+            = new System.Collections.Generic.List<(float, float, float, float)>();
+
+        private static bool TryLoadObstacles(string logPath)
+        {
+            try
+            {
+                var lines = File.ReadAllLines(logPath);
+                int begin = -1;
+                for (int i = lines.Length - 1; i >= 0; i--)
+                    if (lines[i].Contains("[COL] BEGIN")) { begin = i; break; }
+                if (begin < 0) return false;
+
+                _obstacles.Clear();
+                for (int i = begin + 1; i < lines.Length; i++)
+                {
+                    var L = lines[i];
+                    if (L.Contains("[COL] END")) break;
+                    var f = L.Split(' ');
+                    if (f.Length < 7) continue;
+                    if (L.Contains("Player")) continue;             // 玩家会动，不能当静态障碍
+                    if (!int.TryParse(f[0], out int layer)) continue;
+                    if (layer != 9 && layer != 0) continue;         // 只看 Ship / Default
+                    if (!float.TryParse(f[1], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var x0)) continue;
+                    float.TryParse(f[2], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var y0);
+                    float.TryParse(f[3], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var x1);
+                    float.TryParse(f[4], System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var y1);
+                    float area = (x1 - x0) * (y1 - y0);
+                    if (area <= 0f || area >= 5f) continue;         // ★ 大的是地板/摇杆区，排除
+                    _obstacles.Add((x0, y0, x1, y1));
+                    Console.WriteLine($"      · 障碍物 x[{x0:F2},{x1:F2}] y[{y0:F2},{y1:F2}] ({f[6]})");
+                }
+                Console.WriteLine($"      ★★★ 障碍物 {_obstacles.Count} 个");
+                return true;
+            }
+            catch (Exception e) { Console.WriteLine($"      [障碍物] 解析失败: {e.Message}"); return false; }
+        }
+
+        /// <summary>是否撞到障碍物（留 0.25 余量 = 玩家半径）</summary>
+        private static bool HitsObstacle(float x, float y)
+        {
+            const float R = 0.25f;
+            foreach (var o in _obstacles)
+                if (x > o.x0 - R && x < o.x1 + R && y > o.y0 - R && y < o.y1 + R) return true;
+            return false;
+        }
+
         /// <summary>
         /// 持续发送位置更新，让角色向右走。
         ///
@@ -551,17 +797,57 @@ namespace BotClient
                     // ★ 来回走，**绝不瞬移**。
                     //   之前到 +40 就跳回 -40 —— 房主看到的是一次异常位移，
                     //   加上 10Hz 的包量，直接把房主的状态机冲垮（用户被踢出游戏）。
-                    _posX += _dir * 0.25f;
-                    if (_posX > 6f)  { _posX = 6f;  _dir = -1; }   // 小范围活动，别撞地图边界
-                    if (_posX < -6f) { _posX = -6f; _dir =  1; }
-                    _seq++;
-
-                    // 只在每 5 个包打一次日志，避免刷屏
-                    if (_seq % 5 == 0)
-                        SendRaw($"位置({_posX:F1},{_posY:F1})",
-                                BuildPosition(_gameId, _cntNetId, _seq, _posX, _posY));
+                    // ═══════════════════════════════════════════════════
+                    // ★ 随机游走 + 碰撞检测
+                    //
+                    // 之前写的「贴墙滑行」有 bug：冷却期间每帧翻转方向，
+                    // 结果卡在墙角来回抖（实测 x 在 2.8~3.0 之间反复）。
+                    //
+                    // 改成最简单也最自然的做法：
+                    //   · 每 ~2 秒换一个随机方向
+                    //   · 直走被挡就立刻重选方向（而不是滑行）
+                    //   · 万一站在非法位置（网格/边界变更），朝房间中心走
+                    // ═══════════════════════════════════════════════════
+                    if (!InRoom(_posX, _posY) || HitsObstacle(_posX, _posY))
+                    {
+                        // 脱困：朝房间中心走
+                        float cx = (_roomMinX + _roomMaxX) / 2f;
+                        float cy = (_roomMinY + _roomMaxY) / 2f;
+                        float dx = cx - _posX, dy = cy - _posY;
+                        float len = MathF.Sqrt(dx * dx + dy * dy);
+                        if (len > 0.001f) { _posX += dx / len * Step; _posY += dy / len * Step; }
+                    }
                     else
-                        SendPos(BuildPosition(_gameId, _cntNetId, _seq, _posX, _posY));
+                    {
+                        if (--_dirFrames <= 0)
+                        {
+                            // 换方向：偏好水平（看起来像在大厅里踱步）
+                            var rnd = _rng.NextDouble();
+                            if (rnd < 0.62) { _dx = _rng.Next(2) == 0 ? 1f : -1f; _dy = 0f; }
+                            else { _dx = 0f; _dy = _rng.Next(2) == 0 ? 1f : -1f; }
+                            _dirFrames = 16 + _rng.Next(16);       // 约 1.6~3.2 秒
+                        }
+
+                        float nx = _posX + _dx * Step;
+                        float ny = _posY + _dy * Step;
+                        if (InRoom(nx, ny) && !HitsObstacle(nx, ny))
+                        {
+                            _posX = nx; _posY = ny;
+                        }
+                        else
+                        {
+                            _dirFrames = 0;                        // 撞墙 → 下一帧立刻重选方向
+                        }
+                    }
+
+                    _seq++;                            // ★ 序列号必须自增！
+                                                       //   之前被误删，导致永远发 seq=0，
+                                                       //   房主当成过期包忽略掉。
+                    var pkt = BuildPosition(_gameId, _cntNetId, _seq, _posX, _posY);
+                    if (_seq % 5 == 0)
+                        SendRaw($"位置({_posX:F1},{_posY:F1})", pkt);   // 每秒打一次日志
+                    else
+                        SendPos(pkt);
                 }
                 catch (Exception e) { Console.WriteLine($"      [移动失败] {e.Message}"); return; }
             }

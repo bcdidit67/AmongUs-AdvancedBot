@@ -279,9 +279,33 @@ namespace ProtoDump
                     if (p == null) continue;
                     sb.Append($" [pid={p.PlayerId} '{p.PlayerName}'");
                     try { sb.Append($" owner={p.OwnerId}"); } catch { }
+                    // ★ 职业 —— 用来回答「哪个机器人是内鬼」
+                    try
+                    {
+                        int rt = (int)p.RoleType;
+                        string rn = rt switch
+                        {
+                            0 => "船员", 1 => "★内鬼★", 2 => "科学家", 3 => "工程师",
+                            4 => "守护天使", 5 => "变形者", 6 => "船员(鬼)", 7 => "内鬼(鬼)",
+                            _ => $"Role{rt}"
+                        };
+                        sb.Append($" 职业={rn}");
+                    }
+                    catch { }
+                    try { if (p.IsDead) sb.Append(" ☠已死"); } catch { }
                     sb.Append(']');
                 }
                 Plugin.L.LogInfo($"[GDP] 玩家表({gd.AllPlayers.Count}):{sb}");
+                // ★ 单独打一行「谁是内鬼」，便于一眼找到
+                var imp = new System.Text.StringBuilder();
+                for (int i = 0; i < gd.AllPlayers.Count; i++)
+                {
+                    var q = gd.AllPlayers[i];
+                    if (q == null) continue;
+                    try { if ((int)q.RoleType == 1 || (int)q.RoleType == 7) imp.Append($" pid={q.PlayerId} '{q.PlayerName}'"); }
+                    catch { }
+                }
+                if (imp.Length > 0) Plugin.L.LogWarning($"[GDP] ★★★ 内鬼:{imp}");
             }
             catch { }
         }

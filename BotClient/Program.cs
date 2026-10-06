@@ -42,6 +42,7 @@ namespace BotClient
         private static ushort _seq;
         private static bool _moving;
         private static string _userName = "BotTest";   // 名字（多个人机时各不相同）
+        private static int _voteFor = -1;             // ★ 投票目标 playerId（-1=不投）
         private static int _dir = 1;   // 1=右, -1=左
         private const float Step = 0.20f;   // 每帧位移
         private static float _dx = 1f, _dy;   // 当前游走方向
@@ -97,6 +98,7 @@ namespace BotClient
 
             // 1. Hello
             _userName = user;
+            if (args.Length > 9 && int.TryParse(args[9], out var vf)) _voteFor = vf;
             SendRaw("Hello(发起)", BuildHello(NextNonce(), version, user));
             Thread.Sleep(300);
 
@@ -484,6 +486,20 @@ namespace BotClient
                 if (i >= end) return;
                 i++;                                   // flags
                 uint ncomp = ReadPacked(d, ref i);
+
+                // ★ 记录 MeetingHud（SpawnType=1）的 netId —— 投票 RPC 要打给它
+                if (st == 1)
+                {
+                    int mhNet = (int)ReadPacked(d, ref i);
+                    Console.WriteLine($"      ★★★ MeetingHud netId={mhNet} → 开始投票（目标 pid={_voteFor}）");
+                    if (_voteFor >= 0)
+                    {
+                        Thread.Sleep(300);
+                        SendRaw($"CastVote(我={_playerId} → 投{_voteFor})",
+                                BuildRpc(_gameId, mhNet, 24, new byte[] { (byte)_playerId, (byte)_voteFor }));
+                    }
+                    return;
+                }
 
                 if (st != 4 || owner != (uint)_myClientId) return;
 
@@ -1344,6 +1360,28 @@ namespace BotClient
         private static byte[] BuildAck(ushort nonce) =>
             new byte[] { 0x0A, (byte)(nonce >> 8), (byte)(nonce & 0xFF), 0xFF };
 
+
+
+        /// <summary>通用 RPC 包（Reliable + GameData + RpcFlag）</summary>
+        private static byte[] BuildRpc(int gameId, int netId, byte callId, byte[] payload)
+        {
+            var nid = PackUInt32((uint)netId);
+            int subLen = nid.Length + 1 + payload.Length;
+            int gdLen = 4 + 2 + 1 + subLen;
+            using var ms = new System.IO.MemoryStream();
+            ms.WriteByte(0x01);
+            var n = NextNonce();
+            ms.WriteByte((byte)(n >> 8)); ms.WriteByte((byte)(n & 0xFF));
+            ms.WriteByte((byte)(gdLen & 0xFF)); ms.WriteByte((byte)((gdLen >> 8) & 0xFF));
+            ms.WriteByte(0x05);
+            var g = BitConverter.GetBytes(gameId); ms.Write(g, 0, 4);
+            ms.WriteByte((byte)(subLen & 0xFF)); ms.WriteByte((byte)((subLen >> 8) & 0xFF));
+            ms.WriteByte(0x02);                       // RpcFlag
+            ms.Write(nid, 0, nid.Length);
+            ms.WriteByte(callId);
+            ms.Write(payload, 0, payload.Length);
+            return ms.ToArray();
+        }
 
         /// <summary>静默发送（不打印日志）—— 位置包频率高，全打会刷屏</summary>
         private static void SendPos(byte[] pkt)

@@ -7,11 +7,13 @@
 #   几个人机**同时**加入时，房主可能还没处理完前一个就分配下一个，
 #   于是拿到相同的 id。间隔几秒顺序加入最稳。
 #
-# 用法:  ./multi-bot.sh [数量] [起始颜色]
+# 用法:  ./multi-bot.sh [数量] [起始颜色] [投票目标playerId]
+#   第三个参数 = 内鬼的 playerId，给了就会在会议开始时投票给他
 # ═══════════════════════════════════════════════════════════════
 set -u
 N="${1:-3}"
 C0="${2:-1}"
+VOTE="${3:--1}"   # -1 = 不投票
 GAME=$(readlink -f "$HOME/.local/share/Steam/steamapps/common/Among Us")
 LOG="$GAME/BepInEx/LogOutput.log"
 DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -49,8 +51,9 @@ for i in $(seq 0 $((N-1))); do
     PID_ARG=$(( i + 1 ))
     LOGF="/tmp/bot-$PID_ARG.log"
     echo
-    echo "  ── [$((i+1))/$N] $NAME  颜色=$COLOR  playerId=$PID_ARG ──"
-    nohup dotnet bin/Release/net6.0/BotClient.dll 32 50663600 "$NAME" 0 0 8 "$COLOR" "$PID_ARG" > "$LOGF" 2>&1 &
+    echo "  ── [$((i+1))/$N] $NAME  颜色=$COLOR  playerId=$PID_ARG  投票目标=$VOTE ──"
+    # 参数: gameId version user seconds _rpcNetId _netBase color forcePid rpcTarget voteFor
+    nohup dotnet bin/Release/net6.0/BotClient.dll 32 50663600 "$NAME" 0 0 8 "$COLOR" "$PID_ARG" 0 "$VOTE" > "$LOGF" 2>&1 &
     echo "     PID $!  →  $LOGF"
     # 等这个人的角色真正被房主创建出来（收到 Spawn）再放下一个
     for t in $(seq 1 20); do

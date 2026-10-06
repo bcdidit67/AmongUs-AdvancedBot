@@ -43,6 +43,7 @@ namespace BotClient
         private static bool _moving;
         private static string _userName = "BotTest";   // 名字（多个人机时各不相同）
         private static int _voteFor = -1;             // ★ 投票目标 playerId（-1=不投）
+        private static bool _rejoining;               // 正在重返大厅
         private static int _dir = 1;   // 1=右, -1=左
         private const float Step = 0.20f;   // 每帧位移
         private static float _dx = 1f, _dy;   // 当前游走方向
@@ -315,6 +316,37 @@ namespace BotClient
                     Console.WriteLine($"      ← 房主发来: tag=0x{tag:X2}({tn}) len={len}");
                 }
                 catch { }
+                if (tag == 0x08 && !_rejoining)                // ★ EndGame —— 对局结束
+                {
+                    // ═══════════════════════════════════════════════════
+                    // ★★★ 对局结束后回到大厅 ★★★
+                    //
+                    // 对局结束时房主会重建大厅对象，但**不会主动通知已有客户端重新进场景**。
+                    // 真客户端会自己重发一遍 SceneChange（所以用户点「继续」能回房间），
+                    // 而我们的人机原来不处理 EndGame —— 于是只剩心跳、不再收到任何数据。
+                    //
+                    // 修法：收到 EndGame 就重走一遍「报到 + 场景切换」，
+                    //       房主会因此重新执行 SendInitialData + CreatePlayer。
+                    // ═══════════════════════════════════════════════════
+                    _rejoining = true;
+                    _ourNetId = -1; _cntNetId = -1;             // 旧 netId 作废
+                    Console.WriteLine("      ★★★ 收到 EndGame —— 对局结束，准备重返大厅");
+                    var t2 = new Thread(() =>
+                    {
+                        try
+                        {
+                            Thread.Sleep(2500);                  // 等房主重建大厅
+                            Console.WriteLine("      → 重发 ClientInfo + SceneChange");
+                            SendRaw("ClientInfo(重返)", BuildClientInfo(_gameId, _myClientId, 2));
+                            Thread.Sleep(300);
+                            SendRaw("SceneChange(重返大厅)", BuildSceneChange(_gameId, _myClientId, "OnlineGame"));
+                            Thread.Sleep(500);
+                            _rejoining = false;                  // 允许处理下一次 EndGame
+                        }
+                        catch (Exception e) { Console.WriteLine($"      [重返失败] {e.Message}"); _rejoining = false; }
+                    }) { IsBackground = true };
+                    t2.Start();
+                }
                 if (tag == 0x04) TryExtractOurNetId(d, pos, len);   // ★ 房主发来的 Spawn
 
                 if (tag == 0x07 && len >= 12 && pos + 12 <= d.Length)

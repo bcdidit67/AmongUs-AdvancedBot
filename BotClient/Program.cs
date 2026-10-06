@@ -750,6 +750,36 @@ namespace BotClient
                 if (tmp.Count == 0) return false;
                 if (scene == _geoScene) return false;        // 同一场景不重复载入
 
+                // ★★★ 排除「包住其它房间的外圈」★★★
+                //
+                // 实测数据：大厅里有两个 Ship 层的框，而且是**嵌套**的 ——
+                //     Lobby(Clone)  x[-2.73, 2.81]   ← 地板，真正可行走
+                //     ShipRoom      x[-3.45, 3.46]   ← 包住地板的一圈墙
+                // 之前的判据是「在任一房间内即可」，于是 ShipRoom 放行了墙的厚度，
+                // 人机走到 x=3.10（超过地板的 2.81）—— 看起来就是穿墙。
+                //
+                // 规则：若某个房间框**完全包含**另一个房间框，那它是墙圈，剔除。
+                var roomList = tmp.FindAll(b => b.Room);
+                var inner = new System.Collections.Generic.List<Box>();
+                foreach (var a in roomList)
+                {
+                    bool containsOther = false;
+                    foreach (var b in roomList)
+                    {
+                        if (ReferenceEquals(a, b)) continue;
+                        // b 是否完全落在 a 内部（留 0.1 容差）
+                        if (b.x0 > a.x0 - 0.1f && b.x1 < a.x1 + 0.1f &&
+                            b.y0 > a.y0 - 0.1f && b.y1 < a.y1 + 0.1f)
+                        { containsOther = true; break; }
+                    }
+                    if (!containsOther) inner.Add(a);
+                    else Console.WriteLine($"      · 剔除墙圈 {a.x0:F1},{a.y0:F1} ~ {a.x1:F1},{a.y1:F1}（它包住了别的房间）");
+                }
+                if (inner.Count > 0)
+                {
+                    tmp.RemoveAll(b => b.Room && !inner.Contains(b));
+                }
+
                 lock (_boxes)
                 {
                     _boxes.Clear(); _boxes.AddRange(tmp);
@@ -882,6 +912,33 @@ namespace BotClient
                             gd = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
                                               ".local/share/Steam/steamapps/common/Among Us");
                         TryLoadGeometry(Path.Combine(gd, "BepInEx/LogOutput.log"));
+                    }
+
+                    // ★★★ 若自己站在墙里（出生点、或上次被挤出去），
+                    //     先朝最近的合法格走 —— 否则 A* 起点非法，永远规划不出路径，
+                    //     表现出来就是「站在原地一动不动」（实测踩过）。
+                    if (!Walkable(_posX, _posY))
+                    {
+                        float ex = 0f, ey = 0f; bool found = false;
+                        for (int r = 1; r <= 12 && !found; r++)
+                            for (int dj = -r; dj <= r && !found; dj++)
+                                for (int di = -r; di <= r && !found; di++)
+                                {
+                                    if (Math.Abs(di) != r && Math.Abs(dj) != r) continue;
+                                    float wx = _posX + di * 0.5f, wy = _posY + dj * 0.5f;
+                                    if (Walkable(wx, wy)) { ex = di * 0.5f; ey = dj * 0.5f; found = true; }
+                                }
+                        if (found)
+                        {
+                            float l = MathF.Sqrt(ex * ex + ey * ey);
+                            if (l > 0.001f) { _posX += ex / l * Step; _posY += ey / l * Step; }
+                            path.Clear(); idx = 0;
+                            _seq++;
+                            var esc = BuildPosition(_gameId, _cntNetId, _seq, _posX, _posY);
+                            if (_seq % 5 == 0) SendRaw($"脱困({_posX:F1},{_posY:F1})", esc);
+                            else SendPos(esc);
+                        }
+                        continue;
                     }
 
                     if (idx >= path.Count)

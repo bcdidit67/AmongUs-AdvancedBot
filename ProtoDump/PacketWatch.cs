@@ -47,6 +47,38 @@ namespace ProtoDump
         // 与其继续猜 Hello 的字段（Hazel 版本字节、字段顺序…），
         // 不如直接把游戏自己发的那串字节抄下来 —— 那是服务端**已经接受过**的格式。
         // ═══════════════════════════════════════════════════════════
+
+        // ═══════════════════════════════════════════════════════════
+        // ★★★ 输出当前 GameId ★★★
+        //
+        // 人机一直把 gameId 写死成 32，但**本地游戏的 gameId 不是固定的** ——
+        // 每次开房可能不同。写错时服务端回 IncorrectGame，反复重试还会把房主弄掉线
+        // （实测：每次都是 5/14 或 13/14 就位后房主连接中断）。
+        //
+        // 这里把真实值报出来，人机启动时读它即可。
+        // ═══════════════════════════════════════════════════════════
+        private static int _lastGameId = int.MinValue;
+
+        internal static void TickIdAndGrid()
+        {
+            TickGameId();
+            TickGrid();
+        }
+
+        internal static void TickGameId()
+        {
+            try
+            {
+                var c = AmongUsClient.Instance;
+                if (c == null) return;
+                int gid = c.GameId;
+                if (gid == _lastGameId) return;
+                _lastGameId = gid;
+                Plugin.L.LogWarning($"[GAME] ★ GameId = {gid}");
+            }
+            catch { }
+        }
+
         // ═══════════════════════════════════════════════════════════
         // ★★★ 可行走网格 —— 让人机不穿墙 ★★★
         //

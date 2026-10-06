@@ -118,6 +118,26 @@ namespace BotClient
                     Console.WriteLine("      ⚠️ 未解析到碰撞几何 —— 寻路会原地不动（等场景变化后会重试）");
             }
 
+            // 1.8 ★ 用插件报出来的**真实** GameId 覆盖命令行参数
+            //     （写死 32 会导致 IncorrectGame，反复重试还会把房主弄掉线）
+            {
+                string gd = Environment.GetEnvironmentVariable("AMONGUS_DIR");
+                if (string.IsNullOrEmpty(gd))
+                    gd = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                                      ".local/share/Steam/steamapps/common/Among Us");
+                int realGid = TryLoadGameId(Path.Combine(gd, "BepInEx/LogOutput.log"));
+                if (realGid >= 0 && realGid != gameId)
+                {
+                    Console.WriteLine($"      ★ GameId 用日志里的 {realGid}（命令行给的是 {gameId}）");
+                    gameId = realGid;
+                    _gameId = realGid;
+                }
+                else if (realGid < 0)
+                {
+                    Console.WriteLine($"      ⚠️ 日志里没有 GameId（插件没重载？）—— 沿用命令行的 {gameId}");
+                }
+            }
+
             // 2. JoinGame
             SendRaw("JoinGame", BuildJoinGame(gameId));
 
@@ -1498,6 +1518,30 @@ namespace BotClient
             ms.WriteByte(callId);
             ms.Write(payload, 0, payload.Length);
             return ms.ToArray();
+        }
+
+
+        /// <summary>
+        /// 从游戏日志里读真实 GameId（插件输出的 [GAME] ★ GameId = N）。
+        ///
+        /// ★ 为什么必须这样：本地游戏的 gameId **不是固定的 32**，每次开房可能不同。
+        ///   写错时服务端回 IncorrectGame；反复重试还会把房主弄掉线
+        ///   （实测：每次都是 5/14 或 13/14 就位之后房主连接中断）。
+        /// </summary>
+        private static int TryLoadGameId(string logPath)
+        {
+            try
+            {
+                if (!File.Exists(logPath)) return -1;
+                var lines = File.ReadAllLines(logPath);
+                for (int i = lines.Length - 1; i >= 0; i--)
+                {
+                    var m = System.Text.RegularExpressions.Regex.Match(lines[i], @"\[GAME\] ★ GameId = (-?\d+)");
+                    if (m.Success && int.TryParse(m.Groups[1].Value, out int g)) return g;
+                }
+            }
+            catch { }
+            return -1;
         }
 
         /// <summary>静默发送（不打印日志）—— 位置包频率高，全打会刷屏</summary>

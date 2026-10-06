@@ -228,7 +228,7 @@ namespace ProtoDump
             RawWatch.Tick(Time.deltaTime);   // 内部每 2 秒 flush 一次
             PlayerInfoWatch.Tick(Time.deltaTime);
             PlayerInfoWatch.TickPrefab(Time.deltaTime);
-            PacketWatch.TickGrid();            // ★ 大厅加载后输出一次可行走网格
+            PacketWatch.TickIdAndGrid();            // ★ 大厅加载后输出一次可行走网格
 
             _t += Time.deltaTime;
             if (_t < 2f) return;

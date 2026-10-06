@@ -67,18 +67,24 @@ namespace ProtoDump
         internal const int GH = 96;
         internal const float CELL = 0.5f;
         private const float PlayerRadius = 0.30f;   // 略小于真实半径，避免过度保守
-        private static bool _gridDumped;
+        private static string _gridDumpedFor;   // ★ 改成「按场景」记录，而不是只导一次
 
         internal static void TickGrid()
         {
-            if (_gridDumped) return;
+            // ★ 场景一变就重新导出 —— 否则进地图后用的还是大厅的碰撞几何
+            //   （之前只导一次，所以人机在地图里完全没有墙体约束）
+            string scene = "";
+            try { scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name ?? ""; } catch { }
+            if (string.IsNullOrEmpty(scene)) return;
+            if (_gridDumpedFor == scene) return;
+
             try
             {
                 // ⚠️ 只等 LobbyBehaviour —— **不能等 ShipStatus**：
                 //    ShipStatus 是真正的游戏地图，开局后才加载；
                 //    大厅（LobbyBehaviour）是独立场景，里面根本没有 ShipStatus。
                 //    之前多写了这一句，导致网格在大厅阶段永远生成不出来。
-                if (LobbyBehaviour.Instance == null) return;
+                if (LobbyBehaviour.Instance == null && ShipStatus.Instance == null) return;
 
                 // ★ 先诊断：看看大厅里的碰撞体到底分布在哪些层
                 //   （用 ShipOnlyMask 采出来 9027/9216 都是可走 —— 说明墙不在 "Ship" 层）
@@ -124,7 +130,8 @@ namespace ProtoDump
                 }
                 sb.AppendLine("[GRID] END");
                 Plugin.L.LogWarning(sb.ToString());
-                _gridDumped = true;
+                _gridDumpedFor = scene;
+                Plugin.L.LogWarning($"[GRID] 场景 = {scene}");
                 Plugin.L.LogWarning($"[GRID] ✅ 可行走网格已输出（{GW}x{GH}，格子 {CELL}，半径 {PlayerRadius}）");
 
                 // ═══════════════════════════════════════════════════════
@@ -142,7 +149,7 @@ namespace ProtoDump
                     var cols = UnityEngine.Object.FindObjectsOfType<Collider2D>();
                     var sb2 = new System.Text.StringBuilder();
                     int cnt = 0;
-                    sb2.AppendLine($"[COL] BEGIN {cols?.Length ?? 0}");
+                    sb2.AppendLine($"[COL] BEGIN {cols?.Length ?? 0} SCENE {scene}");
                     if (cols != null)
                         foreach (var c in cols)
                         {

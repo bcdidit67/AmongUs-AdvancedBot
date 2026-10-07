@@ -2116,7 +2116,13 @@ namespace BotClient
         //
         // 判据：在任一 layer2 多边形内 **且** 在任一 layer9 多边形内 **且** 不在任何 layer12 内
         // ═══════════════════════════════════════════════════════════
-        private class Poly { public int Layer; public float[] X, Y; }
+        private class Poly
+        {
+            public int Layer; public float[] X, Y;
+            public float Area;                  // ★ 多边形面积（鞋带公式）—— 用来区分
+                                                //   「地板」与「小障碍物」（二者同为 layer 9）
+            public bool IsObstacle;             // ★ 载入时一次算好，判定时直接用
+        }
 
         private static readonly System.Collections.Generic.List<Poly> _polys
             = new System.Collections.Generic.List<Poly>();
@@ -2153,6 +2159,22 @@ namespace BotClient
                         float.TryParse(f[3 + k * 2], System.Globalization.NumberStyles.Float,
                                        System.Globalization.CultureInfo.InvariantCulture, out poly.Y[k]);
                     }
+                    // ★ 算面积（鞋带公式）
+                    float ar = 0f;
+                    for (int k = 0, j = n - 1; k < n; j = k++)
+                        ar += (poly.X[j] * poly.Y[k]) - (poly.X[k] * poly.Y[j]);
+                    poly.Area = MathF.Abs(ar) * 0.5f;
+
+                    // ★★★ 障碍判据 ★★★
+                    //   地图：layer 12（桌椅栏杆）
+                    //   大厅：layer 9 / 0 的**小**方块（RightBox/Leftbox/SmallBox/Panel…）
+                    //         —— 大厅的地板也是 layer 9，靠面积区分：
+                    //            地板 Lobby(Clone) 约 21，小方块都在 5 以下
+                    //   之前只查 layer 12，于是大厅的箱子全被放行，
+                    //   机器人直接从箱子里穿过去（用户实测）。
+                    poly.IsObstacle = (poly.Layer == 12)
+                                   || ((poly.Layer == 9 || poly.Layer == 0) && poly.Area < 8f);
+
                     tmp.Add(poly);
                 }
                 if (tmp.Count == 0) return false;
@@ -2216,9 +2238,14 @@ namespace BotClient
                 if (_polys.Count == 0) return true;      // 还没载入 → 不做限制
                 foreach (var p in _polys)
                 {
+                    if (p.IsObstacle)
+                    {
+                        // ★ 障碍优先判定（含大厅的小箱子与地图的家具）
+                        if (InPoly(p, x, y)) return false;
+                        continue;
+                    }
                     if (p.Layer == 2) { hasArea = true; if (!inArea && InPoly(p, x, y)) inArea = true; }
                     else if (p.Layer == 9) { hasGround = true; if (!onGround && InPoly(p, x, y)) onGround = true; }
-                    else if (p.Layer == 12 && InPoly(p, x, y)) return false;   // 撞到家具
                 }
                 if (hasArea && hasGround) return inArea && onGround;
                 if (hasArea) return inArea;

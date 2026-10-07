@@ -919,6 +919,56 @@ namespace BotClient
             return Path.Combine(gd, "BepInEx/LogOutput.log");
         }
 
+
+        // ═══════════════════════════════════════════════════════════
+        // ★★★ 路径平滑（拉绳法 / string-pulling）★★★
+        //
+        // 用户发现的：真人可以按 W+A、W+D 斜着走（8 方向），
+        // 而我们的 A* 只有 4 邻域 —— 路径全是「先横后竖」的直角折线，
+        // 看起来就像机器人在走方格，非常生硬。
+        //
+        // 平滑做法：从起点开始，尽量与更远的后续路点连直线
+        // （中间不撞墙就跳过它们）。结果自然会走出斜线，
+        // 和真人用 WASD 组合走出来的轨迹一致。
+        //
+        // ⚠️ 只改「往哪走」，完全不碰包格式与频率。
+        // ═══════════════════════════════════════════════════════════
+        private static bool LineOfSight(float x0, float y0, float x1, float y1)
+        {
+            float dx = x1 - x0, dy = y1 - y0;
+            float dist = MathF.Sqrt(dx * dx + dy * dy);
+            int steps = (int)(dist / 0.15f) + 2;          // 每 0.15 单位采样一次
+            for (int i = 1; i < steps; i++)
+            {
+                float t = i / (float)steps;
+                if (!Walkable(x0 + dx * t, y0 + dy * t)) return false;
+            }
+            return true;
+        }
+
+        private static System.Collections.Generic.List<(float x, float y)> SmoothPath(
+            System.Collections.Generic.List<(float x, float y)> path, float startX, float startY)
+        {
+            if (path == null || path.Count <= 2) return path;
+            var outp = new System.Collections.Generic.List<(float x, float y)>();
+            float cx = startX, cy = startY;
+            int i = 0;
+            int guard = 0;
+            while (i < path.Count && guard++ < 5000)
+            {
+                // 从最远的点往回找第一个「能直线到达」的
+                int best = i;
+                for (int j = path.Count - 1; j > i; j--)
+                {
+                    if (LineOfSight(cx, cy, path[j].x, path[j].y)) { best = j; break; }
+                }
+                outp.Add(path[best]);
+                cx = path[best].x; cy = path[best].y;
+                i = best + 1;
+            }
+            return outp;
+        }
+
         /// <summary>给 Ai.cs 用的可行走范围（几何载入后才知道）</summary>
         internal static void WalkableBounds(out float minX, out float minY, out float maxX, out float maxY)
         { minX = _mapMinX; minY = _mapMinY; maxX = _mapMaxX; maxY = _mapMaxY; }
@@ -1090,7 +1140,7 @@ namespace BotClient
                     if (ai.StepCover(_posX, _posY, out float cvx, out float cvy))
                     {
                         var cp = FindPath(_posX, _posY, cvx, cvy);
-                        if (cp != null && cp.Count > 0) { path = cp; idx = 0; tx = cvx; ty = cvy; }
+                        if (cp != null && cp.Count > 0) { path = SmoothPath(cp, _posX, _posY); idx = 0; tx = cvx; ty = cvy; }
                     }
                     else if (ai.WantsToReport && _ourNetId >= 0)
                     {
@@ -1198,7 +1248,8 @@ namespace BotClient
                                 if (!Walkable(gx, gy)) continue;
                                 var rp = FindPath(_posX, _posY, gx, gy);
                                 if (rp == null || rp.Count == 0) continue;
-                                path = rp; idx = 0; okPath = true; tx = gx; ty = gy;
+                                path = SmoothPath(rp, _posX, _posY);   // ★ 平滑 → 斜着走
+                                idx = 0; okPath = true; tx = gx; ty = gy;
                             }
                             if (!okPath)
                             {
@@ -1257,7 +1308,7 @@ namespace BotClient
 
                         var aiPath = FindPath(_posX, _posY, desire.Value.x, desire.Value.y);
                         if (aiPath != null && aiPath.Count > 0)
-                        { path = aiPath; idx = 0; okPath = true; tx = desire.Value.x; ty = desire.Value.y; }
+                        { path = SmoothPath(aiPath, _posX, _posY); idx = 0; okPath = true; tx = desire.Value.x; ty = desire.Value.y; }
 
                         // ★ 到不了 → 记一次失败，放弃这个目标（下次重新问 AI）。
                         //   注意：这里**不再**随机选点兜底 —— 那正是抽搐的根源。

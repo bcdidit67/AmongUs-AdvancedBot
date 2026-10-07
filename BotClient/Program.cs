@@ -1116,6 +1116,7 @@ namespace BotClient
             float _lastMoveX = float.NaN, _lastMoveY = float.NaN;   // 看门狗
             long _stuckSince = Environment.TickCount64;
             bool _rescuing = false;
+            long _lastRealProgress = Environment.TickCount64;   // 上次「真的能走」的时刻
             int geoCheck = 0;
 
             while (true)
@@ -1147,6 +1148,55 @@ namespace BotClient
                                               ".local/share/Steam/steamapps/common/Among Us");
                         TryLoadPolys(Path.Combine(gd, "BepInEx/LogOutput.log"));
                         TryLoadGeometry(Path.Combine(gd, "BepInEx/LogOutput.log"));
+                    }
+
+                    // ═══════════════════════════════════════════════════
+                    // ★★★ 边界自救：站在地板边线上 → A* 找不到起点 → 永远原地 ★★★
+                    //
+                    // 实测：两台机器人出生在 y = 3.00（地板 y 上限正好是 3.00），
+                    // 位置**刚好在边界线上**。此时：
+                    //   · 单点判定可能仍算「合法」（射线法在边界上的结果不稳定）
+                    //   · 但 A* 用的是 0.5 网格的**格心**，边界附近几乎没有合法格心
+                    //   · → FindPath 找不到起点 → 返回 null → 一直发「原地」包
+                    // （日志证据：连续 115 个原地包，坐标恒为 (-1.3, 3.0)）
+                    //
+                    // 处理：只要发现「自己在边上」或「连续一会儿没能规划出路径」，
+                    //       就直接 SnapTo(21) 传送到一个**离边界足够远**的安全点。
+                    //       SnapTo 是游戏自己的 RPC，正经手段。
+                    // ═══════════════════════════════════════════════════
+                    if (Environment.TickCount64 - _lastRealProgress > 4000 && _cntNetId > 0)
+                    {
+                        float sx = 0f, sy = 0f; bool got = false;
+                        for (int t = 0; t < 200 && !got; t++)
+                        {
+                            float rx = _mapMinX + (float)_rng.NextDouble() * (_mapMaxX - _mapMinX);
+                            float ry = _mapMinY + (float)_rng.NextDouble() * (_mapMaxY - _mapMinY);
+                            // ★ 要求「自己也行、四周 0.5 也全行」—— 离边界足够远
+                            if (!Walkable(rx, ry)) continue;
+                            bool okAll = true;
+                            for (int d = 0; d < 4 && okAll; d++)
+                            {
+                                float ox = (d == 0 ? 0.5f : d == 1 ? -0.5f : 0f);
+                                float oy = (d == 2 ? 0.5f : d == 3 ? -0.5f : 0f);
+                                if (!Walkable(rx + ox, ry + oy)) okAll = false;
+                            }
+                            if (okAll) { sx = rx; sy = ry; got = true; }
+                        }
+                        if (got)
+                        {
+                            Console.WriteLine($"      ★★★ 边界自救：传送到安全点 ({sx:F1},{sy:F1})（原 {_posX:F1},{_posY:F1}）");
+                            _posX = sx; _posY = sy;
+                            path.Clear(); idx = 0; _hasAiTarget = false;
+                            _seq++;
+                            var snap = new System.Collections.Generic.List<byte>();
+                            int rx2 = Math.Clamp((int)MathF.Round((sx + 50f) / 100f * 65535f), 0, 65535);
+                            int ry2 = Math.Clamp((int)MathF.Round((sy + 50f) / 100f * 65535f), 0, 65535);
+                            snap.Add((byte)(rx2 & 0xFF)); snap.Add((byte)(rx2 >> 8));
+                            snap.Add((byte)(ry2 & 0xFF)); snap.Add((byte)(ry2 >> 8));
+                            snap.Add((byte)(_seq & 0xFF)); snap.Add((byte)(_seq >> 8));
+                            SendRaw("SnapTo(边界自救)", BuildRpc(_gameId, _cntNetId, 21, snap.ToArray()));
+                        }
+                        _lastRealProgress = Environment.TickCount64;
                     }
 
                     // ★★★ 刀后掩饰优先于一切（用户在意的「别秒刀自爆」）★★★
@@ -1342,6 +1392,7 @@ namespace BotClient
 
                     if (idx < path.Count)
                     {
+                        _lastRealProgress = Environment.TickCount64;   // ★ 有路径要走了 → 刷新进度
                         float dx = path[idx].x - _posX, dy = path[idx].y - _posY;
                         float dist = MathF.Sqrt(dx * dx + dy * dy);
                         float nx, ny;
@@ -2172,18 +2223,91 @@ namespace BotClient
                     //            地板 Lobby(Clone) 约 21，小方块都在 5 以下
                     //   之前只查 layer 12，于是大厅的箱子全被放行，
                     //   机器人直接从箱子里穿过去（用户实测）。
-                    poly.IsObstacle = (poly.Layer == 12)
-                                   || ((poly.Layer == 9 || poly.Layer == 0) && poly.Area < 8f);
-
                     tmp.Add(poly);
                 }
                 if (tmp.Count == 0) return false;
+
+                // ★★★ 障碍判定：不靠面积阈值，靠「谁是地板」★★★
+                //
+                // 踩过的坑：原来用「layer 9 且面积 < 8」判障碍。
+                //   地板 Lobby(Clone) 面积 21 ✓ 识别对了，
+                //   但**大厅中央的大桌子面积可能 10~15** —— 被误判成地板 ✗，
+                //   机器人直接从桌子上走过去（用户实测确认：真人跟墙一样进不去）。
+                //
+                // 改成：layer 9 里**最大的那个**才是地板，其余 layer 9/0 的全是障碍。
+                // 这个判据不依赖具体数值，换地图也成立。
+                // ★★★ 先剔除「包住其它多边形的墙圈」★★★
+                //
+                // 多边形路径原来没有这一步（只有包围盒路径有），后果很严重：
+                //   大厅里 ShipRoom（墙圈）面积 35.17 > Lobby(Clone)（真地板）21.00
+                //   → 「最大的当地板」选中了**墙圈** ✗
+                //   → 真正的地板反被判成障碍 ✗
+                //   → 可走区域变成空集，机器人全都不动 ✗
+                //   （用户实测：「开始大厅里都不动」）
+                //
+                // 判据：若某个多边形的**包围盒**完全包含另一个多边形的包围盒，
+                //       它就是墙圈，剔除。
+                var bbox = new (float x0, float y0, float x1, float y1)[tmp.Count];
+                for (int k = 0; k < tmp.Count; k++)
+                {
+                    float x0 = float.MaxValue, y0 = float.MaxValue, x1 = float.MinValue, y1 = float.MinValue;
+                    for (int q = 0; q < tmp[k].X.Length; q++)
+                    {
+                        x0 = MathF.Min(x0, tmp[k].X[q]); x1 = MathF.Max(x1, tmp[k].X[q]);
+                        y0 = MathF.Min(y0, tmp[k].Y[q]); y1 = MathF.Max(y1, tmp[k].Y[q]);
+                    }
+                    bbox[k] = (x0, y0, x1, y1);
+                }
+                // ★ 判据要点：只有「被包住的那个也足够大」时，外面那个才算墙圈。
+                //
+                //   踩过的坑：最初写成「包住任何其它多边形就是墙圈」——
+                //     大厅里 ShipRoom(35.17) 包住 Lobby(Clone)(21.00) → 剔 ✓ 对
+                //     但 Lobby(Clone)(21) 也包住那些小盒子(0.09~0.43) → **也被剔了** ✗
+                //     结果真正的地板没了，地板变成了某个小盒子，机器人又不走了。
+                //
+                //   加上「被包住者面积 > 外面那个的一半」这个条件就分得清：
+                //     ShipRoom 35.17 包住 Lobby 21.00 → 21 > 17.6 ✓ 是墙圈
+                //     Lobby    21.00 包住盒子 0.09  → 0.09 < 10.5 ✗ 不是墙圈 ✓
+                var isRing = new bool[tmp.Count];
+                for (int a = 0; a < tmp.Count; a++)
+                {
+                    if (tmp[a].Layer != 9) continue;
+                    for (int b = 0; b < tmp.Count; b++)
+                    {
+                        if (a == b) continue;
+                        if (tmp[b].Layer != 9 && tmp[b].Layer != 2) continue;
+                        if (tmp[b].Area <= tmp[a].Area * 0.5f) continue;      // ★ 关键条件
+                        if (bbox[b].x0 > bbox[a].x0 - 0.1f && bbox[b].x1 < bbox[a].x1 + 0.1f &&
+                            bbox[b].y0 > bbox[a].y0 - 0.1f && bbox[b].y1 < bbox[a].y1 + 0.1f)
+                        { isRing[a] = true; break; }
+                    }
+                }
+
+                int floorIdx = -1; float maxArea = -1f;
+                for (int k = 0; k < tmp.Count; k++)
+                {
+                    if (isRing[k]) continue;                       // ★ 墙圈不参选地板
+                    if (tmp[k].Layer == 9 && tmp[k].Area > maxArea) { maxArea = tmp[k].Area; floorIdx = k; }
+                }
+                for (int k = 0; k < tmp.Count; k++)
+                {
+                    var p2 = tmp[k];
+                    p2.IsObstacle = (p2.Layer == 12)                       // 地图：桌椅栏杆
+                                 || ((p2.Layer == 9 || p2.Layer == 0)      // 大厅：除地板外都是障碍
+                                     && k != floorIdx && !isRing[k]);      // ★ 墙圈单独处理（见下）
+                    // ★ 墙圈不标成障碍 —— 它本来就是「不该出去」的边界，
+                    //   而可走判定只认地板多边形，所以天然出不去；
+                    //   若标成障碍，反而会和地板判定打架（实测把地板挤掉了）。
+                }
+
                 lock (_polys) { _polys.Clear(); _polys.AddRange(tmp); }
                 _polyBeginLine = begin;
                 int c2 = tmp.FindAll(q => q.Layer == 2).Count;
                 int c9 = tmp.FindAll(q => q.Layer == 9).Count;
                 int c12 = tmp.FindAll(q => q.Layer == 12).Count;
-                Console.WriteLine($"      ★★★ 形状已载入：区域 {c2} 个、地板 {c9} 个、障碍 {c12} 个");
+                int nobs = tmp.FindAll(q => q.IsObstacle).Count;
+                Console.WriteLine($"      ★★★ 形状已载入：区域 {c2} 个、地板 {c9} 个、障碍 {nobs} 个"
+                                  + $"（其中 layer12 家具 {c12} 个、大厅除地板外的 {nobs - c12} 个）");
                 return true;
             }
             catch (Exception e) { Console.WriteLine($"      [形状] 解析失败: {e.Message}"); return false; }

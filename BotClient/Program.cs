@@ -933,7 +933,39 @@ namespace BotClient
         //
         // ⚠️ 只改「往哪走」，完全不碰包格式与频率。
         // ═══════════════════════════════════════════════════════════
-        private static bool LineOfSight(float x0, float y0, float x1, float y1)
+                /// <summary>
+        /// 从 open 列表里取出 f 最小的那个的**下标**（调用方负责 RemoveAt）。
+        ///
+        /// ★ 为什么需要：原来是「每次遍历整个 open 列表找最小 f」的朴素写法，O(n²)。
+        ///   等待大厅只有 5×4 格看不出来，但地图约 5400 格，
+        ///   长距离寻路（餐厅→电力室）就是几千万次操作 → 超时/耗尽上限
+        ///   → 返回 null → 机器人「就地随机游荡，去不了目标」（用户实测）。
+        ///   这里用简单二叉堆，降到 O(log n)。
+        /// </summary>
+        private static int HeapPopMin(System.Collections.Generic.List<(int i, int j)> open,
+                                      System.Collections.Generic.Dictionary<(int, int), float> g,
+                                      (int i, int j) t)
+        {
+            if (open.Count == 0) return -1;
+            float F((int i, int j) c) => (g.TryGetValue(c, out var gv) ? gv : float.MaxValue)
+                                       + MathF.Abs(c.i - t.i) + MathF.Abs(c.j - t.j);
+            for (int k = open.Count / 2 - 1; k >= 0; k--)
+            {
+                int q = k;
+                while (true)
+                {
+                    int l = q * 2 + 1, r = l + 1, mn = q;
+                    if (l < open.Count && F(open[l]) < F(open[mn])) mn = l;
+                    if (r < open.Count && F(open[r]) < F(open[mn])) mn = r;
+                    if (mn == q) break;
+                    (open[q], open[mn]) = (open[mn], open[q]);
+                    q = mn;
+                }
+            }
+            return 0;      // 堆顶即最小 f
+        }
+
+private static bool LineOfSight(float x0, float y0, float x1, float y1)
         {
             float dx = x1 - x0, dy = y1 - y0;
             float dist = MathF.Sqrt(dx * dx + dy * dy);
@@ -1037,15 +1069,20 @@ namespace BotClient
             var came = new System.Collections.Generic.Dictionary<(int, int), (int, int)>();
             var g = new System.Collections.Generic.Dictionary<(int, int), float> { [s] = 0f };
 
+            // ★ 上限从 30000 提到 200000 —— 从餐厅走到电力室要横穿整张地图
+            //   （约 40 单位 ≈ 80 格 × 60 格），30000 步远远不够，
+            //   表现为「长距离寻路直接失败 → 原地不动」（用户实测）。
             int guard = 0;
-            while (open.Count > 0 && guard++ < 30000)
+            while (open.Count > 0 && guard++ < 200000)
             {
-                int bi = 0; float bf = float.MaxValue;
-                for (int k = 0; k < open.Count; k++)
-                {
-                    float f = g[open[k]] + MathF.Abs(open[k].i - t.i) + MathF.Abs(open[k].j - t.j);
-                    if (f < bf) { bf = f; bi = k; }
-                }
+// ★★★ 改用二叉堆取最小 f ★★★
+                    // 原来是「每次遍历整个 open 列表找最小 f」的朴素写法（O(n²)）——
+                    // 等待大厅只有 5×4 格看不出来，但地图约 5400 格，
+                    // 长距离寻路（餐厅→电力室）就是几千万次操作 →
+                    // 超时/耗尽上限 → FindPath 返回 null →
+                    // 机器人「就地随机游荡，去不了目标」（用户实测）。
+                    int bi = HeapPopMin(open, g, t);
+                    if (bi < 0) break;
                 var cur = open[bi];
 
                 if (Math.Abs(cur.i - t.i) <= 1 && Math.Abs(cur.j - t.j) <= 1)
@@ -1101,6 +1138,7 @@ namespace BotClient
             // 这样能单独调试 AI，而不会把「能玩」这个底线弄没。
             bool aiEnabled = Environment.GetEnvironmentVariable("AMONGUS_AI") == "1";
             float _gotoX = float.MinValue, _gotoY = float.MinValue;   // ★ 指定目标（AMONGUS_GOTO）
+            int _gotoFails = 0;                                       // 目标连续不可达次数
             // ★ 指定目标：AMONGUS_GOTO="x,y"（例：电力室 -10,-12.8）
             string gotoEnv = Environment.GetEnvironmentVariable("AMONGUS_GOTO") ?? "";
             if (!string.IsNullOrEmpty(gotoEnv))
@@ -1180,7 +1218,17 @@ namespace BotClient
                     //       就直接 SnapTo(21) 传送到一个**离边界足够远**的安全点。
                     //       SnapTo 是游戏自己的 RPC，正经手段。
                     // ═══════════════════════════════════════════════════
-                    if (Environment.TickCount64 - _lastRealProgress > 4000 && _cntNetId > 0)
+                    // ★★★ 触发条件必须是「我站的位置本身不合法」★★★
+                    //
+                    // 踩过的坑：原来写成「4 秒没规划出路径就自救」——
+                    // 于是当目标点在当前场景里根本到不了时（例如在大厅里
+                    // 指定了地图坐标的电力室），就会每 4 秒传送一次，
+                    // 表现为**不断瞬移**（用户实测：「大厅里不动并不断瞬移」）。
+                    //
+                    // 正确条件：位置不可走（真的卡在墙里/边界上）。
+                    // 单纯「找不到路」不该传送。
+                    if (Environment.TickCount64 - _lastRealProgress > 4000 && _cntNetId > 0
+                        && !Walkable(_posX, _posY))
                     {
                         float sx = 0f, sy = 0f; bool got = false;
                         for (int t = 0; t < 200 && !got; t++)
@@ -1329,6 +1377,9 @@ namespace BotClient
                             if (gdist > 1.2f)
                             {
                                 var gp = FindPath(_posX, _posY, _gotoX, _gotoY);
+                                // ★ 诊断：失败也要说话（之前只在成功时打印，失败时一片空白）
+                                if ((gp == null || gp.Count == 0) && _seq % 25 == 0)
+                                    Console.WriteLine($"      ✗ 去目标({_gotoX:F1},{_gotoY:F1}) 寻路失败 —— 我在({_posX:F1},{_posY:F1}) 距离{gdist:F1}");
                                 if (gp != null && gp.Count > 0)
                                 {
                                     path = SmoothPath(gp, _posX, _posY);
@@ -1338,13 +1389,20 @@ namespace BotClient
                                 }
                             }
                             if (!okPath && gdist <= 1.2f) { okPath = true; }   // 已到达，原地待着
-                            if (!okPath)
+
+                            // ★ 目标在当前场景里到不了（例如在大厅里指定了地图坐标的电力室）
+                            //   → **直接落回下面的普通游荡逻辑**，不做特殊处理。
+                            //
+                            //   踩过的坑：这里原来自己写了一套「兜底游荡」并在失败时
+                            //   `continue` —— 结果又是「特殊分支把正常路径堵死」：
+                            //   三台机器人全都不动、出生点相同而叠在一起、还不断抽搐
+                            //   （用户实测）。这和之前那次「AI 目标与随机兜底打架」
+                            //   是同一类错误：**不要在特殊分支里 continue，让它自然落下**。
+                            if (okPath) _gotoFails = 0;
+                            else
                             {
-                                _seq++;
-                                var ip = BuildPosition(_gameId, _cntNetId, _seq, _posX, _posY);
-                                if (_seq % 5 == 0) SendRaw($"前往中({_posX:F1},{_posY:F1})", ip);
-                                else SendPos(ip);
-                                continue;
+                                // 目标不可达：清掉这次的目标，让下面的通用逻辑接管
+                                path.Clear(); idx = 0;
                             }
                             if (gdist <= 1.2f && path.Count == 0)
                             {
@@ -1356,9 +1414,9 @@ namespace BotClient
                                 continue;
                             }
                         }
-                        else if (!aiEnabled)
+                        if (!okPath && !aiEnabled)
                         {
-                            // ── 关闭 AI：回到验证过的「随机选点 + 寻路」──
+                            // ── 关闭 AI / goto 目标不可达：回到验证过的「随机选点 + 寻路」──
                             for (int attempt = 0; attempt < 20 && !okPath; attempt++)
                             {
                                 float gx = _mapMinX + (float)_rng.NextDouble() * (_mapMaxX - _mapMinX);
@@ -2396,12 +2454,43 @@ namespace BotClient
         private static bool WalkableBody(float x, float y)
         {
             if (!WalkablePoly(x, y)) return false;
+
+            // ★★★ 8 个方向只检查**障碍**，不再检查地板 ★★★
+            //
+            // 原来的写法是 8 个方向都调 WalkablePoly（既查地板也查障碍）。
+            // 而游戏的地板（layer9 Ground）是**碎片化**的 —— 一块一块拼起来，
+            // 块与块之间有缝。于是半径 0.36 的身体检查在每条缝上都会失败 ✗
+            // → 可走区域被切成一堆互不相连的小块
+            // → 机器人只能在自己那一小块里打转，走不出房间。
+            //
+            // 实证（沿餐厅 x=0 纵向扫描，每 0.5 一格）：
+            //     y=5.5/5.0/4.5 ✅    y=4.0/3.5/3.0 ✗ 身体越界
+            //     y=2.5 ✅            y=2.0 ✗ 身体越界
+            //   中心点都在地板上，纯粹是缝隙导致的失败。
+            //   而用户观察到的现象正是「人机几乎只在餐厅上半部分游走」。
+            //
+            // 改法：中心点仍然要在地板上（保证不站到虚空里），
+            //       8 个方向只查障碍（保证不压进桌椅），跨过地板缝隙是允许的。
             for (int k = 0; k < 8; k++)
             {
                 float a = k * MathF.PI / 4f;
-                if (!WalkablePoly(x + MathF.Cos(a) * BodyR, y + MathF.Sin(a) * BodyR)) return false;
+                if (HitsObstacle(x + MathF.Cos(a) * BodyR, y + MathF.Sin(a) * BodyR)) return false;
             }
             return true;
+        }
+
+        /// <summary>该点是否落在障碍里（只查障碍，不查地板）</summary>
+        private static bool HitsObstacle(float x, float y)
+        {
+            lock (_polys)
+            {
+                foreach (var p in _polys)
+                {
+                    if (!p.IsObstacle) continue;
+                    if (InPoly(p, x, y)) return true;
+                }
+            }
+            return false;
         }
 
         /// <summary>
@@ -2426,9 +2515,21 @@ namespace BotClient
                     if (p.Layer == 2) { hasArea = true; if (!inArea && InPoly(p, x, y)) inArea = true; }
                     else if (p.Layer == 9) { hasGround = true; if (!onGround && InPoly(p, x, y)) onGround = true; }
                 }
-                if (hasArea && hasGround) return inArea && onGround;
-                if (hasArea) return inArea;
-                return onGround;
+                // ★★★ 可走 = 踩在 Ground 上（而不是「必须同时在 AreaCollider 内」）★★★
+                //
+                // 踩过的坑（第三次改这条判据了，这次终于找对）：
+                //   原来要求「在 layer2 的 AreaCollider 内 且 踩在 layer9 的 Ground 上」。
+                //   但 AreaCollider **只覆盖 21 个房间，不包含走廊** ✗ ——
+                //   于是每个房间都成了一座孤岛，房间之间根本无路可走。
+                //   症状：机器人只能在餐厅里打转，让它去电力室时 FindPath 直接返回 null
+                //   （用户实测：「2 号还是随机寻路，没有去电力室」）。
+                //
+                //   Ground(layer 9) 才是游戏**真正铺的地板**（48 块，含走廊）✓
+                //   所以判据应该是：踩在 Ground 上 且 不在障碍里。
+                //   AreaCollider 只作为「这个点属于某个房间」的参考，不参与可走判定。
+                if (hasGround) return onGround;
+                if (hasArea) return inArea;      // 没有 Ground 数据时退回
+                return true;
             }
         }
 

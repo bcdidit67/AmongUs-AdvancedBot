@@ -300,6 +300,7 @@ namespace BotClient
 
         private float _targetX, _targetY;
         private long _pauseUntil;
+        private bool _targetSet;      // 目标是否已经设过（防止 (0,0) 默认值被当成目标）
         private string _state = "闲逛";
 
         public string State => _state;
@@ -327,6 +328,26 @@ namespace BotClient
 
             // ── 正在「做任务」的停留中 ──
             if (now < _pauseUntil) { _state = "停留(装做任务)"; return null; }
+
+            // ★★★ 目标合法性检查 —— 必须放在最前面 ★★★
+            //
+            // 踩过的坑：_targetX/_targetY 初始是 (0,0)，而 (0,0) 在大厅里
+            // 可能正落在障碍物上 → FindPath 永远失败 → _hasAiTarget 被清空
+            // → 再问 AI → 又返回 (0,0) → 死循环。
+            // 表现就是机器人**永远站在原地发「原地」包**（实测连续 22 次）。
+            //
+            // 所以：没设过目标、或目标已不可走 → 立刻重选一个。
+            if (!_targetSet || !Program.WalkablePublic(_targetX, _targetY))
+            {
+                PickNewTarget(myX, myY);
+                _targetSet = true;
+                if (!Program.WalkablePublic(_targetX, _targetY))
+                {
+                    // 连选都选不出来（几何没载入等）—— 随便朝一个方向挪，别卡死
+                    _state = "无处可去(等几何)";
+                    return null;
+                }
+            }
 
             // ── 内鬼：附近有落单的船员 → 下刀（这是最高优先级行动）──
             if (World.AmImpostor)
@@ -370,6 +391,7 @@ namespace BotClient
                 _pauseUntil = now + (long)(pause * 1000);
                 _state = World.AmImpostor ? "停留(装做任务)" : "停留(做任务)";
                 PickNewTarget(myX, myY);
+                _targetSet = true;
                 return null;
             }
 
@@ -497,17 +519,41 @@ namespace BotClient
             return 3;                  // REACTOR
         }
 
+        /// <summary>
+        /// 选一个新的游荡目标。
+        ///
+        /// ★ 踩过的坑：原来是「以自己为中心、随机方向和 2~12 的距离」撒点。
+        ///   大厅只有 5.5 × 3.8 大，绝大多数点都落在墙外 → 20 次全失败 →
+        ///   兜底把目标设成**当前位置** → td &lt; 0.6 → 判定「已到达」→
+        ///   暂停 + 重选 → 又选不到 → 无限暂停，机器人永远不动
+        ///   （实测：连续 42 次「原地」包，跨距 0.0）。
+        ///
+        /// 改成：在**整张地图的可行走范围内**撒点（不依赖自己当前位置），
+        ///       并要求离自己至少 1.5 —— 这样一定选得出「值得走一趟」的点。
+        /// </summary>
         private void PickNewTarget(float myX, float myY)
         {
-            for (int i = 0; i < 20; i++)
+            float minX, maxX, minY, maxY;
+            Program.WalkableBounds(out minX, out minY, out maxX, out maxY);
+
+            float bestX = myX, bestY = myY; bool found = false;
+            for (int i = 0; i < 120; i++)
             {
-                double a = _rng.NextDouble() * Math.PI * 2;
-                float r = 2f + (float)_rng.NextDouble() * WanderRadius;
-                float nx = myX + (float)Math.Cos(a) * r;
-                float ny = myY + (float)Math.Sin(a) * r;
-                if (Program.WalkablePublic(nx, ny)) { _targetX = nx; _targetY = ny; return; }
+                float nx = minX + (float)_rng.NextDouble() * (maxX - minX);
+                float ny = minY + (float)_rng.NextDouble() * (maxY - minY);
+                if (!Program.WalkablePublic(nx, ny)) continue;
+                float dx = nx - myX, dy = ny - myY;
+                // 太近的没意义（会立刻判定到达）；太远的先收下当备选
+                if (dx * dx + dy * dy < 1.5f * 1.5f)
+                {
+                    if (!found) { bestX = nx; bestY = ny; found = true; }
+                    continue;
+                }
+                _targetX = nx; _targetY = ny;
+                return;
             }
-            _targetX = myX; _targetY = myY;      // 找不到就走回原地
+            if (found) { _targetX = bestX; _targetY = bestY; return; }
+            // 真的一个点都找不到（几何还没载入）→ 保持原目标，别乱动
         }
     }
 }

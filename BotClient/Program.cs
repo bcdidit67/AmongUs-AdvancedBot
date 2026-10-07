@@ -919,6 +919,10 @@ namespace BotClient
             return Path.Combine(gd, "BepInEx/LogOutput.log");
         }
 
+        /// <summary>给 Ai.cs 用的可行走范围（几何载入后才知道）</summary>
+        internal static void WalkableBounds(out float minX, out float minY, out float maxX, out float maxY)
+        { minX = _mapMinX; minY = _mapMinY; maxX = _mapMaxX; maxY = _mapMaxY; }
+
         /// <summary>给 Ai.cs 用的可走判定（AI 不直接碰几何细节）</summary>
         internal static bool WalkablePublic(float x, float y) => Walkable(x, y);
 
@@ -1036,7 +1040,20 @@ namespace BotClient
             var path = new System.Collections.Generic.List<(float x, float y)>();
             int idx = 0;
             float tx = 0, ty = 0;
-            // ★★★ 行为 AI 初始化 ★★★
+            // ★★★ 行为 AI —— 默认**关闭** ★★★
+            //
+            // 说明：AI 层（Ai.cs）目前有「卡住后无法自行恢复」的一类问题，
+            // 已修了 5 个成因仍在冒新的。而它**不影响**底层能力
+            // （寻路、不穿墙、协议）—— 那些是验证过的。
+            //
+            // 所以先用开关隔离：默认走「随机游荡」这条已验证可用的路径，
+            // 想试 AI 就设环境变量 AMONGUS_AI=1。
+            // 这样能单独调试 AI，而不会把「能玩」这个底线弄没。
+            bool aiEnabled = Environment.GetEnvironmentVariable("AMONGUS_AI") == "1";
+            Console.WriteLine(aiEnabled
+                ? "      ★ AI 模式：开（AMONGUS_AI=1）"
+                : "      ☆ AI 模式：关 —— 用随机游荡（稳定）。想试 AI 就设 AMONGUS_AI=1");
+
             var ai = new Ai(Environment.ProcessId);
             Console.WriteLine($"      ★ 性格: 停留 {ai.PauseMin:F1}~{ai.PauseMax:F1}s  " +
                               $"游荡半径 {ai.WanderRadius:F1}  下刀距离 {ai.KillReach:F2}  怕人程度 {ai.CrowdFear:F2}");
@@ -1046,6 +1063,9 @@ namespace BotClient
             float _aiTargetX = 0f, _aiTargetY = 0f;   // ★ AI 的锁定目标（防止抖动）
             bool _hasAiTarget = false;
             int _aiTargetFails = 0;
+            float _lastMoveX = float.NaN, _lastMoveY = float.NaN;   // 看门狗
+            long _stuckSince = Environment.TickCount64;
+            bool _rescuing = false;
             int geoCheck = 0;
 
             while (true)
@@ -1168,6 +1188,29 @@ namespace BotClient
                         // 修法：把 AI 的目标记下来并「锁定」，只有在**真的到达**、
                         // 或者连续多次都到不了时，才重新问 AI。
                         bool okPath = false;
+                        if (!aiEnabled)
+                        {
+                            // ── 关闭 AI：回到验证过的「随机选点 + 寻路」──
+                            for (int attempt = 0; attempt < 20 && !okPath; attempt++)
+                            {
+                                float gx = _mapMinX + (float)_rng.NextDouble() * (_mapMaxX - _mapMinX);
+                                float gy = _mapMinY + (float)_rng.NextDouble() * (_mapMaxY - _mapMinY);
+                                if (!Walkable(gx, gy)) continue;
+                                var rp = FindPath(_posX, _posY, gx, gy);
+                                if (rp == null || rp.Count == 0) continue;
+                                path = rp; idx = 0; okPath = true; tx = gx; ty = gy;
+                            }
+                            if (!okPath)
+                            {
+                                _seq++;
+                                var idle2 = BuildPosition(_gameId, _cntNetId, _seq, _posX, _posY);
+                                if (_seq % 5 == 0) SendRaw($"原地({_posX:F1},{_posY:F1})", idle2);
+                                else SendPos(idle2);
+                                continue;
+                            }
+                        }
+                        else
+                        {
                         bool needNewDesire = !_hasAiTarget ||
                                              (MathF.Abs(_posX - _aiTargetX) < 0.7f &&
                                               MathF.Abs(_posY - _aiTargetY) < 0.7f);
@@ -1230,6 +1273,7 @@ namespace BotClient
                             else SendPos(idle);
                             continue;
                         }
+                        }   // ← AI 分支结束
                     }
 
                     if (idx < path.Count)
@@ -1288,6 +1332,59 @@ namespace BotClient
                         Console.WriteLine($"      ★★★ 内鬼破坏 → {nm}(SystemType={sys})");
                         SendRaw($"RepairSystem(破坏 {nm})",
                                 BuildSabotage(_gameId, World.ShipStatusNetId, sys, _ourNetId));
+                    }
+
+                    // ═══════════════════════════════════════════════════
+                    // ★★★ 看门狗：卡住太久就脱困 ★★★
+                    //
+                    // 今天在「卡住」这一类问题上反复踩坑：
+                    //   · AI 目标与随机兜底打架 → 抽搐
+                    //   · 目标锁死在一个不可达的点 → 永远原地
+                    //   · 出生/被挤到墙里 → A* 起点非法 → 出不来
+                    //   · 选不到游荡点 → 目标变成自己 → 无限暂停
+                    // 每次都是「一旦卡住就永远出不来」。
+                    //
+                    // 与其一个个追成因，不如加个兜底：连续 8 秒位置没变
+                    // 就强制脱困 —— 用 SnapTo(21) 传送到最近的合法点。
+                    // SnapTo 是游戏自己的 RPC（用于通风管与飞艇选出生点），
+                    // 是正经手段，不是 hack。
+                    // ═══════════════════════════════════════════════════
+                    if (MathF.Abs(_posX - _lastMoveX) > 0.05f || MathF.Abs(_posY - _lastMoveY) > 0.05f)
+                    {
+                        _lastMoveX = _posX; _lastMoveY = _posY;
+                        _stuckSince = Environment.TickCount64;
+                    }
+                    else if (Environment.TickCount64 - _stuckSince > 8000 && _cntNetId > 0 && !_rescuing)
+                    {
+                        _rescuing = true;
+                        Console.WriteLine("      ★★★ 看门狗：卡住超过 8 秒 → 强制脱困（SnapTo 到最近合法点）");
+                        // 螺旋找最近的合法点
+                        float ex = _posX, ey = _posY; bool found = false;
+                        for (int r = 1; r <= 20 && !found; r++)
+                            for (int dj = -r; dj <= r && !found; dj++)
+                                for (int di = -r; di <= r && !found; di++)
+                                {
+                                    if (Math.Abs(di) != r && Math.Abs(dj) != r) continue;
+                                    float wx = _posX + di * 0.5f, wy = _posY + dj * 0.5f;
+                                    if (Walkable(wx, wy)) { ex = wx; ey = wy; found = true; }
+                                }
+                        Console.WriteLine($"      → 脱困点 ({ex:F1},{ey:F1})（原 {_posX:F1},{_posY:F1}）");
+                        _posX = ex; _posY = ey;
+                        path.Clear(); idx = 0;
+                        _hasAiTarget = false;          // 让 AI 重新决策
+                        _seq++;
+                        // SnapTo(21): 载荷 = 位置(4) + 上序列号(2)
+                        var snap = new System.Collections.Generic.List<byte>();
+                        var tmp = new byte[4];
+                        int rx = (int)MathF.Round((ex + 50f) / 100f * 65535f);
+                        int ry = (int)MathF.Round((ey + 50f) / 100f * 65535f);
+                        rx = Math.Clamp(rx, 0, 65535); ry = Math.Clamp(ry, 0, 65535);
+                        snap.Add((byte)(rx & 0xFF)); snap.Add((byte)(rx >> 8));
+                        snap.Add((byte)(ry & 0xFF)); snap.Add((byte)(ry >> 8));
+                        snap.Add((byte)(_seq & 0xFF)); snap.Add((byte)(_seq >> 8));
+                        SendRaw("SnapTo(脱困)", BuildRpc(_gameId, _cntNetId, 21, snap.ToArray()));
+                        _stuckSince = Environment.TickCount64;
+                        _rescuing = false;
                     }
 
                     World.MyNetId = _ourNetId;

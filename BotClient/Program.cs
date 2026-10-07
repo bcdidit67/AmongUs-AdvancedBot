@@ -1100,6 +1100,22 @@ namespace BotClient
             // 想试 AI 就设环境变量 AMONGUS_AI=1。
             // 这样能单独调试 AI，而不会把「能玩」这个底线弄没。
             bool aiEnabled = Environment.GetEnvironmentVariable("AMONGUS_AI") == "1";
+            float _gotoX = float.MinValue, _gotoY = float.MinValue;   // ★ 指定目标（AMONGUS_GOTO）
+            // ★ 指定目标：AMONGUS_GOTO="x,y"（例：电力室 -10,-12.8）
+            string gotoEnv = Environment.GetEnvironmentVariable("AMONGUS_GOTO") ?? "";
+            if (!string.IsNullOrEmpty(gotoEnv))
+            {
+                var parts = gotoEnv.Split(',');
+                if (parts.Length == 2 &&
+                    float.TryParse(parts[0], System.Globalization.NumberStyles.Float,
+                                   System.Globalization.CultureInfo.InvariantCulture, out float gx0) &&
+                    float.TryParse(parts[1], System.Globalization.NumberStyles.Float,
+                                   System.Globalization.CultureInfo.InvariantCulture, out float gy0))
+                {
+                    _gotoX = gx0; _gotoY = gy0;
+                    Console.WriteLine($"      ★ 指定目标模式：所有机器人都走向 ({gx0:F1},{gy0:F1})");
+                }
+            }
             Console.WriteLine(aiEnabled
                 ? "      ★ AI 模式：开（AMONGUS_AI=1）"
                 : "      ☆ AI 模式：关 —— 用随机游荡（稳定）。想试 AI 就设 AMONGUS_AI=1");
@@ -1300,8 +1316,47 @@ namespace BotClient
                         //
                         // 修法：把 AI 的目标记下来并「锁定」，只有在**真的到达**、
                         // 或者连续多次都到不了时，才重新问 AI。
+                        // ★★★ 指定目标模式（AMONGUS_GOTO="x,y"）★★★
+                        //
+                        // 用于「让所有机器人走到某个房间」这类测试。
+                        // 坐标来自地图数据里的房间中心，例如电力室 ≈ (-10.0, -12.8)
+                        // （用游戏自带的 DetectiveLocationsSkeld/Electrical 标记校验过）。
                         bool okPath = false;
-                        if (!aiEnabled)
+                        if (_gotoX != float.MinValue)
+                        {
+                            float gd2x = _gotoX - _posX, gd2y = _gotoY - _posY;
+                            float gdist = MathF.Sqrt(gd2x * gd2x + gd2y * gd2y);
+                            if (gdist > 1.2f)
+                            {
+                                var gp = FindPath(_posX, _posY, _gotoX, _gotoY);
+                                if (gp != null && gp.Count > 0)
+                                {
+                                    path = SmoothPath(gp, _posX, _posY);
+                                    idx = 0; okPath = true; tx = _gotoX; ty = _gotoY;
+                                    if (_seq % 25 == 0)
+                                        Console.WriteLine($"      →前往目标({_gotoX:F1},{_gotoY:F1}) 还剩 {gdist:F1}");
+                                }
+                            }
+                            if (!okPath && gdist <= 1.2f) { okPath = true; }   // 已到达，原地待着
+                            if (!okPath)
+                            {
+                                _seq++;
+                                var ip = BuildPosition(_gameId, _cntNetId, _seq, _posX, _posY);
+                                if (_seq % 5 == 0) SendRaw($"前往中({_posX:F1},{_posY:F1})", ip);
+                                else SendPos(ip);
+                                continue;
+                            }
+                            if (gdist <= 1.2f && path.Count == 0)
+                            {
+                                // 到了 —— 原地待命（仍发位置包，别人眼里不会「消失」）
+                                _seq++;
+                                var sp = BuildPosition(_gameId, _cntNetId, _seq, _posX, _posY);
+                                if (_seq % 5 == 0) SendRaw($"★已到目标({_posX:F1},{_posY:F1})", sp);
+                                else SendPos(sp);
+                                continue;
+                            }
+                        }
+                        else if (!aiEnabled)
                         {
                             // ── 关闭 AI：回到验证过的「随机选点 + 寻路」──
                             for (int attempt = 0; attempt < 20 && !okPath; attempt++)

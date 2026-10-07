@@ -1,4 +1,9 @@
 #!/bin/bash
+#
+# 环境变量:
+#   GAP=3             每台就位后再等几秒（默认 2）
+#   GOTO="-10,-12.8"  让所有机器人走到指定坐标（例：电力室）
+#
 # ═══════════════════════════════════════════════════════════════
 # 多个人机 —— 顺序启动，避免同时加入互相撞车
 #
@@ -63,6 +68,8 @@ for i in $(seq 0 $((N-1))); do
     echo
     echo "  ── [$((i+1))/$N] $NAME  颜色=$COLOR  playerId=$PID_ARG  投票目标=$VOTE ──"
     # 参数: gameId version user seconds _rpcNetId _netBase color forcePid rpcTarget voteFor
+    [ -n "$GOTO" ] && export AMONGUS_GOTO="$GOTO"
+
     nohup dotnet bin/Release/net6.0/BotClient.dll 32 50663600 "$NAME" 0 0 8 "$COLOR" "$PID_ARG" 0 "$VOTE" > "$LOGF" 2>&1 &
     echo "     PID $!  →  $LOGF"
     # ★ 等这个人的角色真正被房主创建出来（收到 Spawn）再放下一个

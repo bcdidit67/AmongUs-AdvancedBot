@@ -397,7 +397,12 @@ namespace BotClient
                     }) { IsBackground = true };
                     t2.Start();
                 }
-                if (tag == 0x04) TryExtractOurNetId(d, pos, len);   // ★ 房主发来的 Spawn
+                if (tag == 0x04)                                    // ★ 房主发来的 Spawn
+                {
+                    TryExtractOurNetId(d, pos, len);
+                    World.OnSpawn(d, pos, len);                     // ★ 感知：记录 netId ↔ ownerId
+                }
+                if (tag == 0x01) World.OnData(d, pos, len);         // ★ 感知：别人的位置
 
                 if (tag == 0x07 && len >= 12 && pos + 12 <= d.Length)
                 {
@@ -877,6 +882,19 @@ namespace BotClient
         ///   只满足①会在墙里（AreaCollider 是矩形包围盒，把不规则房间补成了直角）——
         ///   实测 1226 个轨迹点里有约 25% 落在这种地方。
         /// </summary>
+        /// <summary>游戏日志路径（多处要用，统一一处避免环境变量读法不一致）</summary>
+        internal static string GameLogPath()
+        {
+            string gd = Environment.GetEnvironmentVariable("AMONGUS_DIR");
+            if (string.IsNullOrEmpty(gd))
+                gd = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                                  ".local/share/Steam/steamapps/common/Among Us");
+            return Path.Combine(gd, "BepInEx/LogOutput.log");
+        }
+
+        /// <summary>给 Ai.cs 用的可走判定（AI 不直接碰几何细节）</summary>
+        internal static bool WalkablePublic(float x, float y) => Walkable(x, y);
+
         private static bool Walkable(float x, float y)
         {
             // ★ 有真实形状就用真实形状（插件已导出 [POLY]）
@@ -991,6 +1009,13 @@ namespace BotClient
             var path = new System.Collections.Generic.List<(float x, float y)>();
             int idx = 0;
             float tx = 0, ty = 0;
+            // ★★★ 行为 AI 初始化 ★★★
+            var ai = new Ai(Environment.ProcessId);
+            Console.WriteLine($"      ★ 性格: 停留 {ai.PauseMin:F1}~{ai.PauseMax:F1}s  " +
+                              $"游荡半径 {ai.WanderRadius:F1}  下刀距离 {ai.KillReach:F2}  怕人程度 {ai.CrowdFear:F2}");
+            World.MyNetId = -1;              // 由主循环更新
+
+            int _aiTick = 0;
             int geoCheck = 0;
 
             while (true)
@@ -1066,15 +1091,46 @@ namespace BotClient
 
                     if (idx >= path.Count)
                     {
+                        // ★★★ 目标点改由 AI 决定（不再纯随机）★★★
+                        //
+                        // AI 会考虑：内鬼找人下刀、船员装作做任务、
+                        //           到达后停留几秒（外面看起来像在做事）。
+                        // 找不到路时退回随机点，避免卡死。
                         bool okPath = false;
+                        var desire = ai.Decide(_posX, _posY, true);
+
+                        if (desire == null)
+                        {
+                            // AI 说「原地待着」（正在装做任务）——
+                            // 但仍要发位置包，否则在别人眼里我们会「消失」。
+                            _seq++;
+                            var idlePkt = BuildPosition(_gameId, _cntNetId, _seq, _posX, _posY);
+                            if (_seq % 5 == 0) SendRaw($"原地({_posX:F1},{_posY:F1}) [{ai.State}]", idlePkt);
+                            else SendPos(idlePkt);
+
+                            // 顺手看看要不要下刀
+                            int kt = ai.KillTargetNetId(_posX, _posY);
+                            if (kt > 0 && _ourNetId >= 0)
+                            {
+                                Console.WriteLine($"      ★★★ AI 下刀 → netId={kt} [{ai.State}]");
+                                SendRaw($"MurderPlayer(netId={kt})",
+                                        BuildRpc(_gameId, _ourNetId, 12, PackUInt32((uint)kt)));
+                            }
+                            continue;
+                        }
+
+                        var aiPath = FindPath(_posX, _posY, desire.Value.x, desire.Value.y);
+                        if (aiPath != null && aiPath.Count > 0)
+                        { path = aiPath; idx = 0; okPath = true; tx = desire.Value.x; ty = desire.Value.y; }
+
                         for (int attempt = 0; attempt < 15 && !okPath; attempt++)
                         {
                             float gx = _mapMinX + (float)_rng.NextDouble() * (_mapMaxX - _mapMinX);
                             float gy = _mapMinY + (float)_rng.NextDouble() * (_mapMaxY - _mapMinY);
                             if (!Walkable(gx, gy)) continue;
-                            var p = FindPath(_posX, _posY, gx, gy);
-                            if (p == null || p.Count == 0) continue;
-                            path = p; idx = 0; okPath = true; tx = gx; ty = gy;
+                            var p2 = FindPath(_posX, _posY, gx, gy);
+                            if (p2 == null || p2.Count == 0) continue;
+                            path = p2; idx = 0; okPath = true; tx = gx; ty = gy;
                         }
                         if (!okPath)
                         {
@@ -1110,6 +1166,12 @@ namespace BotClient
                             path.Clear(); idx = 0;
                         }
                     }
+
+                    World.MyNetId = _ourNetId;
+                    World.MyOwner = _myClientId;
+                    World.NoteOwnPosition(_posX, _posY);
+                    if (++_aiTick % 10 == 0)
+                        World.RefreshFromLog(GameLogPath());
 
                     _seq++;
                     // ★ 速度 = 朝当前路点的方向 × 步速（1 单位/秒），接收方靠它算走路动画

@@ -403,6 +403,7 @@ namespace BotClient
                     World.OnSpawn(d, pos, len);                     // ★ 感知：记录 netId ↔ ownerId
                 }
                 if (tag == 0x01) World.OnData(d, pos, len);         // ★ 感知：别人的位置
+                if (tag == 0x05) World.OnDespawn(d, pos, len);      // ★ 感知：对象被销毁
 
                 if (tag == 0x07 && len >= 12 && pos + 12 <= d.Length)
                 {
@@ -1254,6 +1255,29 @@ namespace BotClient
                             // 前面被挡 → 丢掉当前路径，下一轮重新规划（A* 会绕开）
                             path.Clear(); idx = 0;
                         }
+                    }
+
+                    // ★★★ 自己的角色被销毁（换场景/对局重开）→ 重发报到与场景切换 ★★★
+                    if (World.OurObjectDespawned && !_rejoining && _myClientId >= 0)
+                    {
+                        _rejoining = true;
+                        World.OurObjectDespawned = false;
+                        Console.WriteLine("      ★★★ 我们的角色被销毁（Despawn）—— 重发 ClientInfo + SceneChange 重建");
+                        _ourNetId = -1; _cntNetId = -1;
+                        var rt = new Thread(() =>
+                        {
+                            try
+                            {
+                                Thread.Sleep(1200);
+                                SendRaw("ClientInfo(重建)", BuildClientInfo(_gameId, _myClientId, 2));
+                                Thread.Sleep(300);
+                                SendRaw("SceneChange(重建)", BuildSceneChange(_gameId, _myClientId, "OnlineGame"));
+                                Thread.Sleep(1500);
+                            }
+                            catch { }
+                            _rejoining = false;
+                        }) { IsBackground = true };
+                        rt.Start();
                     }
 
                     // ★ 内鬼定期破坏（关灯/氧气/反应堆）——制造混乱，也是战术

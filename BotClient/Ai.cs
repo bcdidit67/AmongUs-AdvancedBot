@@ -99,6 +99,7 @@ namespace BotClient
                     }
                     p.OwnerId = (int)owner;
                     ByOwner[(int)owner] = p;
+                    if (MyOwner >= 0 && (int)owner == MyOwner) OurObjectDespawned = false;
                 }
             }
             catch { }
@@ -255,6 +256,34 @@ namespace BotClient
         }
 
         public static void NoteOwnPosition(float x, float y) { MyX = x; MyY = y; }
+
+        // ═══════════════════════════════════════════════════════
+        //  ★★★ 感知 ①.5：Despawn —— 检测「我们自己的角色被销毁」★★★
+        //
+        //  进地图时房主会销毁大厅的所有对象，**包括我们的角色**。
+        //  我们却还在往那个已失效的 netId 发位置包 → 游戏全部忽略
+        //  → 角色停在原地不动。
+        //  （用户实测「游戏大厅里都不动了」；日志证据：
+        //    原地包 140 个 vs 位置包 7 个，且刷屏 Despawn。）
+        //
+        //  而「无处可站」自救当时没触发 —— 拿旧场景几何去判旧坐标是合法的。
+        //  所以必须直接监听 Despawn，这是最准确的信号。
+        //
+        //  载荷: packed NetId（后面可能还有 flags/原因，取第一个即可）
+        // ═══════════════════════════════════════════════════════
+        public static volatile bool OurObjectDespawned;
+
+        public static void OnDespawn(byte[] d, int pos, int len)
+        {
+            try
+            {
+                int i = pos;
+                uint netId = ReadPacked(d, ref i);
+                if (MyNetId > 0 && (int)netId == MyNetId) OurObjectDespawned = true;
+                lock (_lock) { ByNetId.Remove((int)netId); }
+            }
+            catch { }
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════════════

@@ -53,6 +53,8 @@ namespace BotClient
         public static readonly Dictionary<int, PlayerSnap> ByOwner = new();
 
         public static int MyNetId = -1;
+        /// <summary>ShipStatus 的 netId（破坏/关门/修系统的 RPC 要打给它）</summary>
+        public static int ShipStatusNetId = -1;
         public static int MyOwner = -1;
         public static float MyX, MyY;
         public static bool AmImpostor;
@@ -83,6 +85,8 @@ namespace BotClient
                 int netId = (int)ReadPacked(d, ref i);
                 if (netId <= 0) return;
 
+                // SpawnType=0 是 ShipStatus（飞船本体）—— 破坏/关门都要打给它
+                if (st == 0) { ShipStatusNetId = netId; return; }
                 // SpawnType=4 是 PlayerControl；其余（1=MeetingHud 等）跳过
                 if (st != 4) return;
 
@@ -279,6 +283,10 @@ namespace BotClient
             WanderRadius = 4f + (float)_rng.NextDouble() * 8f;
             KillReach = 1.2f + (float)_rng.NextDouble() * 0.6f;
             CrowdFear = 0.5f + (float)_rng.NextDouble() * 1.5f;
+            // ★ 掩饰时长：急躁型 2~4 秒就报，谨慎型能等 6~12 秒
+            CoverDelayMin = 2f + (float)_rng.NextDouble() * 4f;
+            CoverDelayMax = CoverDelayMin + 2f + (float)_rng.NextDouble() * 6f;
+            SabotageCooldown = 25f + (float)_rng.NextDouble() * 40f;
         }
 
         /// <summary>
@@ -357,6 +365,107 @@ namespace BotClient
                 if (score > bestScore && score > 0.35f) { bestScore = score; best = p.NetId; }
             }
             return best;
+        }
+
+
+        // ═══════════════════════════════════════════════════════
+        //  ★★★ 刀后掩饰：假装「刚发现尸体」而不是「秒刀自爆」★★★
+        //
+        //  用户的原话：
+        //      「内鬼也可以刀完人后在原地等几秒再报告，
+        //        这样可以假装自己是刚发现尸体的船员，
+        //        而不是秒刀后自爆」
+        //
+        //  真人内鬼就是这么玩的 —— 秒刀秒报，一眼假。
+        //  所以：刀完先在附近晃 3~8 秒（像在别处做事），
+        //        再走回尸体旁拍桌，最后发一句「我在X发现了尸体」。
+        // ═══════════════════════════════════════════════════════
+        public float CoverDelayMin, CoverDelayMax;   // 掩饰等待时长
+        private long _coverUntil;
+        private float _bodyX, _bodyY;
+        private bool _covering;
+        private bool _pendingReport;
+
+        public bool WantsToReport => _pendingReport;
+        public (float x, float y) BodyPos => (_bodyX, _bodyY);
+
+        /// <summary>刚刀了人 —— 开始掩饰</summary>
+        public void OnKilled(float bodyX, float bodyY)
+        {
+            _bodyX = bodyX; _bodyY = bodyY;
+            _covering = true;
+            float d = CoverDelayMin + (float)_rng.NextDouble() * (CoverDelayMax - CoverDelayMin);
+            _coverUntil = Environment.TickCount64 + (long)(d * 1000);
+            _state = $"掩饰中({d:F1}s 后装作发现尸体)";
+        }
+
+        /// <summary>掩饰阶段的行为：先走开，时间到了再回尸体旁报告</summary>
+        public bool StepCover(float myX, float myY, out float tx, out float ty)
+        {
+            tx = ty = 0f;
+            if (!_covering) return false;
+            long now = Environment.TickCount64;
+
+            if (now < _coverUntil)
+            {
+                // 还在掩饰期 —— 朝一个「离尸体有点距离」的点走，显得像在忙别的
+                float dx = myX - _bodyX, dy = myY - _bodyY;
+                float d = MathF.Sqrt(dx * dx + dy * dy);
+                if (d < 2.0f)
+                {
+                    // 离尸体太近 → 往反方向走开一点
+                    if (d < 0.01f) { dx = 1f; dy = 0f; d = 1f; }
+                    tx = myX + dx / d * 2.5f;
+                    ty = myY + dy / d * 2.5f;
+                    _state = "掩饰中(走开一点)";
+                    return true;
+                }
+                _state = "掩饰中(假装在忙)";
+                return false;                 // 已经够远了，原地待着
+            }
+
+            // 掩饰够了 → 走向尸体去「发现」它
+            float bd = MathF.Sqrt((_bodyX - myX) * (_bodyX - myX) + (_bodyY - myY) * (_bodyY - myY));
+            if (bd > 0.9f)
+            {
+                tx = _bodyX; ty = _bodyY;
+                _state = "★走向尸体(准备装作发现)";
+                return true;
+            }
+
+            _covering = false;
+            _pendingReport = true;
+            _state = "★★★ 报告尸体（装作刚发现）";
+            return false;
+        }
+
+        public void ReportDone() { _pendingReport = false; }
+
+        // ═══════════════════════════════════════════════════════
+        //  ★ 破坏：内鬼的另一个工具
+        //     RepairSystem(28) 打给 ShipStatus，载荷:
+        //        [byte SystemID][packed PlayerControl netId][byte Amount]
+        //     The Skeld 常用: 7=关灯, 8=氧气, 3=反应堆
+        // ═══════════════════════════════════════════════════════
+        public float SabotageCooldown;      // 两次破坏之间至少隔多久
+        private long _nextSabotage;
+
+        public bool ShouldSabotage()
+        {
+            if (!World.AmImpostor) return false;
+            if (World.ShipStatusNetId < 0) return false;
+            if (Environment.TickCount64 < _nextSabotage) return false;
+            _nextSabotage = Environment.TickCount64 + (long)(SabotageCooldown * 1000);
+            return true;
+        }
+
+        /// <summary>随机挑一个破坏目标（关灯最常见，因为能制造混乱）</summary>
+        public byte PickSabotage()
+        {
+            double r = _rng.NextDouble();
+            if (r < 0.55) return 7;    // ELECTRICAL 关灯
+            if (r < 0.85) return 8;    // O2
+            return 3;                  // REACTOR
         }
 
         private void PickNewTarget(float myX, float myY)

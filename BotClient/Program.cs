@@ -882,6 +882,32 @@ namespace BotClient
         ///   只满足①会在墙里（AreaCollider 是矩形包围盒，把不规则房间补成了直角）——
         ///   实测 1226 个轨迹点里有约 25% 落在这种地方。
         /// </summary>
+        /// <summary>SendChat(13) —— 发言。载荷是「长度前缀字符串」。</summary>
+        private static byte[] BuildChat(int gameId, int pcNetId, string msg)
+        {
+            var body = new System.Collections.Generic.List<byte>();
+            var utf = System.Text.Encoding.UTF8.GetBytes(msg);
+            // 长度用压缩整数写法（长度 < 128 时就是一个字节）
+            if (utf.Length < 128) body.Add((byte)utf.Length);
+            else { body.Add((byte)((utf.Length & 0x7F) | 0x80)); body.Add((byte)(utf.Length >> 7)); }
+            body.AddRange(utf);
+            return BuildRpc(gameId, pcNetId, 13, body.ToArray());
+        }
+
+        /// <summary>RepairSystem(28) —— 内鬼用它**破坏**系统。
+        /// 载荷: [byte SystemID][packed PlayerControl netId][byte Amount]</summary>
+        private static byte[] BuildSabotage(int gameId, int shipNetId, byte systemId, int pcNetId)
+        {
+            var body = new System.Collections.Generic.List<byte> { systemId };
+            body.AddRange(PackUInt32((uint)pcNetId));
+            body.Add(0x00);                      // Amount=0（对破坏而言）
+            return BuildRpc(gameId, shipNetId, 28, body.ToArray());
+        }
+
+        /// <summary>CloseDoorsOfType(27) —— 关门。载荷: [byte SystemID]</summary>
+        private static byte[] BuildCloseDoors(int gameId, int shipNetId, byte systemId)
+            => BuildRpc(gameId, shipNetId, 27, new byte[] { systemId });
+
         /// <summary>游戏日志路径（多处要用，统一一处避免环境变量读法不一致）</summary>
         internal static string GameLogPath()
         {
@@ -1036,6 +1062,38 @@ namespace BotClient
                         TryLoadGeometry(Path.Combine(gd, "BepInEx/LogOutput.log"));
                     }
 
+                    // ★★★ 刀后掩饰优先于一切（用户在意的「别秒刀自爆」）★★★
+                    if (ai.StepCover(_posX, _posY, out float cvx, out float cvy))
+                    {
+                        var cp = FindPath(_posX, _posY, cvx, cvy);
+                        if (cp != null && cp.Count > 0) { path = cp; idx = 0; tx = cvx; ty = cvy; }
+                    }
+                    else if (ai.WantsToReport && _ourNetId >= 0)
+                    {
+                        // ★ 走回尸体旁了 → 拍桌报告，然后发一句话装作刚发现
+                        Console.WriteLine($"      ★★★ 报告尸体（装作刚发现）[{ai.State}]");
+                        SendRaw("ReportDeadBody(尸体)", BuildRpc(_gameId, _ourNetId, 11, new byte[] { 0xFF }));
+                        ai.ReportDone();
+                        var ct = new Thread(() =>
+                        {
+                            try
+                            {
+                                Thread.Sleep(1200 + _rng.Next(1500));
+                                string[] msgs = {
+                                    "刚才路过看到的…",
+                                    "这谁干的",
+                                    "我在附近做任务，一转头就看到了",
+                                    "有人看到谁在这边吗"
+                                };
+                                string m = msgs[_rng.Next(msgs.Length)];
+                                Console.WriteLine($"      → 发言: {m}");
+                                SendRaw("SendChat", BuildChat(_gameId, _ourNetId, m));
+                            }
+                            catch { }
+                        }) { IsBackground = true };
+                        ct.Start();
+                    }
+
                     // ★★★ 若自己站在墙里（出生点、或上次被挤出去），
                     //     先朝最近的合法格走 —— 否则 A* 起点非法，永远规划不出路径，
                     //     表现出来就是「站在原地一动不动」（实测踩过）。
@@ -1115,6 +1173,8 @@ namespace BotClient
                                 Console.WriteLine($"      ★★★ AI 下刀 → netId={kt} [{ai.State}]");
                                 SendRaw($"MurderPlayer(netId={kt})",
                                         BuildRpc(_gameId, _ourNetId, 12, PackUInt32((uint)kt)));
+                                // ★ 刀完不要立刻报 —— 开始掩饰，等几秒再装作刚发现
+                                ai.OnKilled(_posX, _posY);
                             }
                             continue;
                         }
@@ -1165,6 +1225,16 @@ namespace BotClient
                             // 前面被挡 → 丢掉当前路径，下一轮重新规划（A* 会绕开）
                             path.Clear(); idx = 0;
                         }
+                    }
+
+                    // ★ 内鬼定期破坏（关灯/氧气/反应堆）——制造混乱，也是战术
+                    if (ai.ShouldSabotage() && World.ShipStatusNetId >= 0 && _ourNetId >= 0)
+                    {
+                        byte sys = ai.PickSabotage();
+                        string nm = sys == 7 ? "关灯" : sys == 8 ? "氧气" : "反应堆";
+                        Console.WriteLine($"      ★★★ 内鬼破坏 → {nm}(SystemType={sys})");
+                        SendRaw($"RepairSystem(破坏 {nm})",
+                                BuildSabotage(_gameId, World.ShipStatusNetId, sys, _ourNetId));
                     }
 
                     World.MyNetId = _ourNetId;

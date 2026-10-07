@@ -228,11 +228,71 @@ namespace ProtoDump
             catch (Exception e) { Plugin.L.LogError($"[ENUM] 失败: {e.Message}"); }
         }
 
+
+        // ═══════════════════════════════════════════════════════════
+        // ★★★ 彻底枚举碰撞体（含未激活对象）★★★
+        //
+        // 起因：用户说大厅中央那张大桌子真人在那儿走不进去（跟墙一样），
+        //       但我们的 [COL] 段里**完全没有桌子** —— 18 个碰撞体里一个叫 Table 的都没有。
+        //
+        // 怀疑：FindObjectsOfType<Collider2D>() 在 IL2CPP 下找不到**未激活**的对象，
+        //       而桌子的碰撞体可能是运行时才激活的，或者挂在小孩子物体上。
+        //
+        // 所以这里换用 Resources.FindObjectsOfTypeAll<Collider2D>()（含未激活），
+        // 并且把每个碰撞体的**完整层级路径**打出来 —— 一眼能看出哪个是桌子。
+        // ═══════════════════════════════════════════════════════════
+        private static bool _allColDumped;
+
+        internal static void DumpAllCollidersOnce()
+        {
+            // ★★★ 必须只跑一次！★★★
+            //   第一版忘了加这个标记，而这个函数挂在了每帧都会调用的位置，
+            //   结果日志里刷了几百遍「[ALLCOL] ✅ 共 587 个」——
+            //   和今天早上那个 PlayerName setter 刷屏 8000 行是**同一个错误**。
+            if (_allColDumped) return;
+            _allColDumped = true;
+            try
+            {
+                var all = Resources.FindObjectsOfTypeAll<Collider2D>();
+                if (all == null) { Plugin.L.LogWarning("[ALLCOL] 没有结果"); return; }
+                int n = 0;
+                var sb = new System.Text.StringBuilder();
+                sb.AppendLine($"[ALLCOL] BEGIN {all.Length}");
+                foreach (var c in all)
+                {
+                    if (c == null) continue;
+                    try
+                    {
+                        var b = c.bounds;
+                        string path = c.gameObject.name;
+                        try
+                        {
+                            var t = c.transform.parent;
+                            int depth = 0;
+                            while (t != null && depth++ < 6) { path = t.gameObject.name + "/" + path; t = t.parent; }
+                        }
+                        catch { }
+                        bool act = true;
+                        try { act = c.gameObject.activeInHierarchy; } catch { }
+                        sb.AppendLine($"{c.gameObject.layer} {b.min.x:F2} {b.min.y:F2} {b.max.x:F2} {b.max.y:F2} "
+                                    + $"{(act ? "A" : "I")} {c.GetIl2CppType().Name} {path}");
+                        n++;
+                    }
+                    catch { }
+                }
+                sb.AppendLine("[ALLCOL] END");
+                Plugin.L.LogWarning(sb.ToString());
+                Plugin.L.LogWarning($"[ALLCOL] ✅ 共 {n} 个（含未激活）");
+            }
+            catch (Exception e) { Plugin.L.LogError($"[ALLCOL] 失败: {e.Message}"); }
+        }
+
         internal static void TickIdAndGrid()
         {
             TickGameId();
             TickGrid();
             DumpEnumsOnce();
+            DumpAllCollidersOnce();
         }
 
         internal static void TickGameId()

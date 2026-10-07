@@ -138,10 +138,101 @@ namespace ProtoDump
             catch (Exception e) { Plugin.L.LogError($"[POLY] 导出失败: {e.Message}"); }
         }
 
+
+        // ═══════════════════════════════════════════════════════════
+        // ★★★ 反射导出游戏自己的枚举 ★★★
+        //
+        // 用户在「职业设置」里看到 11 个职业（科学家/守护天使/工程师/大嗓门/
+        // 侦察员/侦探/法宫/网红 + 变形者/幻象师/毒蛇），
+        // 而网上协议文档是旧版本的 —— RPC 号与职业枚举都查不到。
+        //
+        // 与其猜，不如让游戏自己报：插件跑在游戏进程里，
+        // 直接反射 il2cpp 的枚举即可，这是**权威且必然匹配本版本**的答案。
+        // ═══════════════════════════════════════════════════════════
+        private static bool _enumsDumped;
+
+        internal static void DumpEnumsOnce()
+        {
+            if (_enumsDumped) return;
+            try
+            {
+                var asm = typeof(PlayerControl).Assembly;
+                // ★ RpcCalls / SpawnType 等是**嵌套类型**（如 InnerNetObject+RpcCalls），
+                //   顶层 GetType 找不到 —— 实测第一次只导出了 TaskTypes 就是这个原因。
+                //   这里把常见宿主类型都试一遍。
+                var hosts = new[] { "", "InnerNetObject+", "InnerNetClient+", "PlayerControl+",
+                                    "ShipStatus+", "GameData+", "AmongUsClient+" };
+                // ★ 名字全部来自 IL2CPP 元数据里的实测结果（不是猜的）：
+                //   职业枚举真名是 RoleTypes（**复数**）——之前写 RoleType 所以找不到。
+                foreach (var name in new[] { "RoleTypes", "RoleType", "RpcCalls", "SystemTypes",
+                                             "SpawnType", "TaskTypes", "DeathReason",
+                                             "PlayerOutfitType", "DisconnectReasons",
+                                             "GameStates", "QuickChatPhraseType" })
+                {
+                    try
+                    {
+                        Type t = null;
+                        foreach (var h in hosts)
+                        {
+                            t = asm.GetType(h + name);
+                            if (t != null) break;
+                        }
+                        if (t == null)
+                        {
+                            // 最后兜底：扫全部类型（il2cpp 下 GetTypes 可能抛，所以放最后且单独 try）
+                            try
+                            {
+                                foreach (var tt in asm.GetTypes())
+                                    if (tt.Name == name) { t = tt; break; }
+                            }
+                            catch { }
+                        }
+                        if (t == null || !t.IsEnum) continue;
+                        var sb = new System.Text.StringBuilder();
+                        sb.Append($"[ENUM] {name}: ");
+                        foreach (var v in Enum.GetValues(t))
+                        {
+                            string cn = "";
+                            if (name.StartsWith("RoleType"))
+                                cn = ((int)v) switch
+                                {
+                                    0 => "(船员)", 1 => "(内鬼)", 2 => "(科学家)", 3 => "(工程师)",
+                                    4 => "(守护天使)", 5 => "(变形者)", 6 => "(船员鬼)", 7 => "(内鬼鬼)",
+                                    8 => "(大嗓门?)", 9 => "(侦察员?)", 10 => "(侦探?)", 11 => "(法宫?)",
+                                    12 => "(幻象师?)", 13 => "(毒蛇?)", 14 => "(网红?)", _ => ""
+                                };
+                            sb.Append($"{(int)v}={v}{cn} ");
+                        }
+                        Plugin.L.LogWarning(sb.ToString());
+                    }
+                    catch { }
+                }
+                // ★ 兜底：把程序集里**所有枚举类型的名字**列出来。
+                //   与其猜 RoleType / RpcCalls 叫什么（这个版本可能叫 RoleTypes 等），
+                //   不如让游戏把清单报出来，我们照着找。
+                try
+                {
+                    var names = new System.Collections.Generic.List<string>();
+                    foreach (var tt in asm.GetTypes())
+                    {
+                        try { if (tt.IsEnum) names.Add(tt.Name); } catch { }
+                    }
+                    names.Sort();
+                    Plugin.L.LogWarning($"[ENUM-LIST] 共 {names.Count} 个枚举: {string.Join(", ", names)}");
+                }
+                catch (Exception e2) { Plugin.L.LogWarning($"[ENUM-LIST] 扫描失败: {e2.Message}"); }
+
+                _enumsDumped = true;
+                Plugin.L.LogWarning("[ENUM] ✅ 枚举导出完成");
+            }
+            catch (Exception e) { Plugin.L.LogError($"[ENUM] 失败: {e.Message}"); }
+        }
+
         internal static void TickIdAndGrid()
         {
             TickGameId();
             TickGrid();
+            DumpEnumsOnce();
         }
 
         internal static void TickGameId()

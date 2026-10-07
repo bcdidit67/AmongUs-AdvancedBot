@@ -1042,6 +1042,9 @@ namespace BotClient
             World.MyNetId = -1;              // 由主循环更新
 
             int _aiTick = 0;
+            float _aiTargetX = 0f, _aiTargetY = 0f;   // ★ AI 的锁定目标（防止抖动）
+            bool _hasAiTarget = false;
+            int _aiTargetFails = 0;
             int geoCheck = 0;
 
             while (true)
@@ -1154,8 +1157,37 @@ namespace BotClient
                         // AI 会考虑：内鬼找人下刀、船员装作做任务、
                         //           到达后停留几秒（外面看起来像在做事）。
                         // 找不到路时退回随机点，避免卡死。
+                        // ★★★ AI 的目标必须**稳定** ★★★
+                        //
+                        // 踩过的坑：每 tick 都问一次 AI，AI 给出的目标若一时找不到路，
+                        // 就会掉进下面的「随机点」兜底 —— 于是目标在
+                        // 「AI 想要的 A」和「随机的 B」之间每 tick 反复横跳，
+                        // 表现为机器人在原地**抽搐**（实测：A 和 B 相距 4.2 个单位）。
+                        //
+                        // 修法：把 AI 的目标记下来并「锁定」，只有在**真的到达**、
+                        // 或者连续多次都到不了时，才重新问 AI。
                         bool okPath = false;
-                        var desire = ai.Decide(_posX, _posY, true);
+                        bool needNewDesire = !_hasAiTarget ||
+                                             (MathF.Abs(_posX - _aiTargetX) < 0.7f &&
+                                              MathF.Abs(_posY - _aiTargetY) < 0.7f);
+
+                        if (needNewDesire)
+                        {
+                            var d0 = ai.Decide(_posX, _posY, true);
+                            if (d0 != null)
+                            {
+                                _aiTargetX = d0.Value.x; _aiTargetY = d0.Value.y;
+                                _hasAiTarget = true;
+                                _aiTargetFails = 0;
+                            }
+                            else
+                            {
+                                _hasAiTarget = false;      // AI 说原地待着
+                            }
+                        }
+                        var desire = _hasAiTarget
+                            ? ((float x, float y)?)(_aiTargetX, _aiTargetY)
+                            : null;
 
                         if (desire == null)
                         {
@@ -1183,14 +1215,11 @@ namespace BotClient
                         if (aiPath != null && aiPath.Count > 0)
                         { path = aiPath; idx = 0; okPath = true; tx = desire.Value.x; ty = desire.Value.y; }
 
-                        for (int attempt = 0; attempt < 15 && !okPath; attempt++)
+                        // ★ 到不了 → 记一次失败，放弃这个目标（下次重新问 AI）。
+                        //   注意：这里**不再**随机选点兜底 —— 那正是抽搐的根源。
+                        if (!okPath)
                         {
-                            float gx = _mapMinX + (float)_rng.NextDouble() * (_mapMaxX - _mapMinX);
-                            float gy = _mapMinY + (float)_rng.NextDouble() * (_mapMaxY - _mapMinY);
-                            if (!Walkable(gx, gy)) continue;
-                            var p2 = FindPath(_posX, _posY, gx, gy);
-                            if (p2 == null || p2.Count == 0) continue;
-                            path = p2; idx = 0; okPath = true; tx = gx; ty = gy;
+                            if (++_aiTargetFails >= 3) { _hasAiTarget = false; _aiTargetFails = 0; }
                         }
                         if (!okPath)
                         {

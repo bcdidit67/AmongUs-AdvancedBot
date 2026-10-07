@@ -281,13 +281,20 @@ namespace ProtoDump
                     try
                     {
                         int rt = (int)p.RoleType;
+                        // ★ 用游戏自己的枚举名（权威），并把**数字**一起打出来 ——
+                        //   数字是关键：有了它才能知道 8/9/10… 分别是什么职业
+                        //   （网上文档是旧版本，新职业的编号查不到）。
+                        string realName = "?";
+                        try { realName = p.RoleType.ToString(); } catch { }
                         string rn = rt switch
                         {
                             0 => "船员", 1 => "★内鬼★", 2 => "科学家", 3 => "工程师",
                             4 => "守护天使", 5 => "变形者", 6 => "船员(鬼)", 7 => "内鬼(鬼)",
-                            _ => $"Role{rt}"
+                            8 => "大嗓门?", 9 => "侦察员?", 10 => "侦探?",
+                            11 => "法宫?", 12 => "幻象师?", 13 => "毒蛇?", 14 => "网红?",
+                            _ => $"未知{rt}"
                         };
-                        sb.Append($" 职业={rn}");
+                        sb.Append($" 职业={rt}({realName}/{rn})");
                     }
                     catch { }
                     try { if (p.IsDead) sb.Append(" ☠已死"); } catch { }
